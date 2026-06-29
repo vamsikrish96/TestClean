@@ -1,12 +1,15 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from app.utils.errors import APIException
+from app.routes import expenses
 
 app = FastAPI(
     title="Expense Approval Workflow API",
     description="API for managing expense claims with approval workflow",
     version="1.0.0",
 )
+
+app.include_router(expenses.router)
 
 
 @app.exception_handler(APIException)
