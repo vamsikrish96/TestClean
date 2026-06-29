@@ -39,3 +39,19 @@ async def submit_expense(
     )
     created = store.create(expense)
     return created
+
+
+@app.get("/expenses", response_model=List[Expense])
+async def list_own_expenses(
+    limit: int = 50,
+    offset: int = 0,
+    token: TokenPayload = Depends(require_role("employee")),
+    store: ExpenseStore = Depends(get_store)
+):
+    if limit < 1 or limit > 1000:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="limit must be between 1 and 1000")
+    if offset < 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="offset must be >= 0")
+
+    all_expenses = store.list_by_employee(token.user_id)
+    return all_expenses[offset:offset + limit]
