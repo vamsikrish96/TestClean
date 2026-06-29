@@ -3,6 +3,8 @@ import json
 from typing import Optional, Callable
 from fastapi import Header, HTTPException, status, Depends
 
+BEARER_PREFIX = "Bearer "
+
 
 class TokenPayload:
     def __init__(self, user_id: str, role: str):
@@ -11,13 +13,13 @@ class TokenPayload:
 
 
 def decode_token(authorization: str) -> TokenPayload:
-    if not authorization or not authorization.startswith("Bearer "):
+    if not authorization or not authorization.startswith(BEARER_PREFIX):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing or invalid authorization header"
         )
 
-    token = authorization[7:]
+    token = authorization[len(BEARER_PREFIX):]
     try:
         payload_bytes = base64.b64decode(token)
         payload_str = payload_bytes.decode('utf-8')
@@ -27,7 +29,7 @@ def decode_token(authorization: str) -> TokenPayload:
             raise ValueError("Missing required fields in token")
 
         return TokenPayload(user_id=payload['user_id'], role=payload['role'])
-    except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as e:
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token format"

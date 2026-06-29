@@ -15,12 +15,19 @@ class Expense(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "id": "exp_001",
+                "id": "exp_000001",
                 "employee_id": "emp_123",
                 "amount": 150.50,
                 "description": "Conference ticket",
                 "status": "SUBMITTED",
                 "submitted_date": "2026-06-29T10:30:00Z",
+                "approval_date": None,
+                "processing_date": None,
+                "manager_notes": None,
+                "finance_notes": None,
+                "approved_by": None,
+                "processed_by": None,
+                "returned_date": None,
             }
         }
     )
@@ -35,6 +42,10 @@ class Expense(BaseModel):
     processing_date: Optional[datetime] = None
     manager_notes: Optional[str] = None
     finance_notes: Optional[str] = None
+    approved_by: Optional[str] = None
+    processed_by: Optional[str] = None
+    returned_date: Optional[datetime] = None
+    version: int = 1
 
 
 class ExpenseSubmit(BaseModel):
@@ -51,4 +62,8 @@ class ExpenseReject(BaseModel):
 
 
 class ExpenseProcess(BaseModel):
+    finance_notes: Optional[str] = Field(None, max_length=500)
+
+
+class ExpenseReturn(BaseModel):
     finance_notes: Optional[str] = Field(None, max_length=500)
