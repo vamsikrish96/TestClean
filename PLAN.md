@@ -2,215 +2,243 @@
 
 ## Problem Statement
 
-Organizations need a streamlined system for employees to submit expense claims and have them approved through a defined workflow. Currently, there's no standardized way to:
-- Submit and track expense claims
-- Route claims through appropriate approval authorities (managers and finance teams)
-- Maintain an audit trail of approvals and rejections
-- Enable employees to monitor the status of their submissions
+Organizations need a streamlined way to manage employee expense claims from submission through approval to processing. Currently, expense workflows are manual and lack transparency:
+- Employees don't know the status of their submitted expenses
+- Managers have no centralized way to review and approve/reject claims
+- Finance teams lack visibility into which expenses are ready to process
+- There's no audit trail of the approval workflow
 
 ## Solution
 
-Build a FastAPI-based Expense Approval Workflow API that automates the expense claim lifecycle through three distinct roles:
-1. **Employees** submit expense claims and track their status
-2. **Managers** review and approve/reject employee claims
-3. **Finance** processes approved claims for payment
+Build a RESTful Expense Approval Workflow API using Python and FastAPI that automates the three-stage approval process:
+1. **Submission**: Employees submit expense claims with details
+2. **Review**: Managers approve or reject claims with feedback
+3. **Processing**: Finance processes approved claims
 
-The system maintains all claims in memory with clear state transitions and role-based access control via header-based authentication.
+The system provides:
+- Role-based access control (Employee, Manager, Finance)
+- Simple mock authentication using JWT-like tokens
+- In-memory data storage for quick iteration
+- Comprehensive input validation
+- Full audit trail of status changes with timestamps and notes
+- RESTful endpoints for each role's workflow
 
 ## User Stories
 
-1. As an employee, I want to submit an expense claim with an amount and description, so that I can get reimbursement for my work-related expenses
-2. As an employee, I want to view the status of my submitted expense claims, so that I know where they are in the approval workflow
-3. As an employee, I want to view details of a specific expense claim, so that I can confirm the information was recorded correctly
-4. As a manager, I want to see all pending expense claims, so that I can review and approve them in a timely manner
-5. As a manager, I want to approve an expense claim with a single action, so that I can move it to the finance team for processing
-6. As a manager, I want to reject an expense claim and provide a reason, so that the employee understands why their claim was not approved
-7. As a finance team member, I want to view all approved expense claims, so that I can process them for payment
-8. As a finance team member, I want to mark a claim as processed, so that I can track payment status
-9. As an employee, I want to see rejection reasons when my claim is rejected, so that I understand what went wrong
-10. As an administrator/auditor, I want to see the complete history of each expense claim, so that I can track all approvals and rejections for compliance
+1. As an employee, I want to submit an expense claim with amount and description, so that I can get reimbursed for business expenses
+2. As an employee, I want to view the status of my submitted expense, so that I know where it is in the approval workflow
+3. As an employee, I want to list all my expenses, so that I can track my submission history
+4. As a manager, I want to see all pending (SUBMITTED) expenses from my team, so that I can review and approve them
+5. As a manager, I want to approve a submitted expense with optional notes, so that I can allow it to proceed to finance processing
+6. As a manager, I want to reject a submitted expense with feedback notes, so that I can inform the employee why it wasn't approved
+7. As finance staff, I want to see all approved expenses awaiting processing, so that I can prioritize my work
+8. As finance staff, I want to mark an approved expense as processed with notes, so that I can complete the workflow
+9. As a system, I want to validate all expense submissions, so that only valid data enters the system
+10. As a system, I want to enforce role-based access control, so that employees can't approve expenses or finance can't submit them
+11. As a system, I want to maintain an audit trail with timestamps for each workflow stage, so that there's visibility into when actions occurred
+12. As a developer, I want comprehensive unit tests, so that I can refactor with confidence
 
 ## Implementation Decisions
 
-### Architecture & Framework
-- **Framework**: FastAPI for modern, fast Python API development with built-in validation and auto-generated OpenAPI docs
-- **Storage**: In-memory Python dictionary-based storage for simplicity (no database dependency)
-- **Authentication**: Header-based mocking via `X-User-ID` and `X-User-Role` headers (no JWT/token validation)
-- **User Model**: Single role per user (employee, manager, or finance) for simplicity
+### 1. Workflow Architecture
+- **Linear three-stage approval**: Employee submit → Manager approval → Finance processing
+- **Terminal states**: REJECTED by manager or PROCESSED by finance are final
+- **No draft stage**: Expenses go directly from submission to SUBMITTED state (no draft persistence)
+- **No edit/cancel**: Simplify initial version; can add later
 
-### Expense Claim Data Model
-**Required fields:**
-- `expense_id`: Unique identifier (UUID)
-- `employee_id`: ID of the employee who submitted the claim
-- `amount`: Positive float/decimal (must be > 0)
-- `category`: Predefined category (Travel, Meals, Equipment, Other)
-- `description`: Non-empty text description of the expense
-- `date_submitted`: ISO 8601 timestamp of submission
+### 2. Expense Data Model
+Each expense tracks:
+- `id`: UUID or sequential identifier
+- `employee_id`: ID of employee who submitted
+- `amount`: Expense amount (positive decimal)
+- `description`: What the expense was for (text)
+- `status`: Current workflow state (SUBMITTED, APPROVED, REJECTED, PROCESSED)
+- `submitted_date`: ISO timestamp when created
+- `approval_date`: ISO timestamp when manager approved (null if not approved)
+- `processing_date`: ISO timestamp when finance processed (null if not processed)
+- `manager_notes`: Optional feedback from manager on approval/rejection
+- `finance_notes`: Optional notes from finance during processing
 
-**Optional fields:**
-- `receipt_url`: URL or reference to receipt/documentation
-- `project_code`: Internal project or cost center code for allocation
-- `department`: Department for tracking
-
-**System-managed fields:**
-- `status`: One of: `SUBMITTED`, `MANAGER_PENDING`, `FINANCE_PENDING`, `APPROVED`, `REJECTED`
-- `created_at`: ISO 8601 timestamp of creation
-- `updated_at`: ISO 8601 timestamp of last modification
-- `manager_id`: ID of the manager who approved/rejected (nullable)
-- `manager_approval_reason`: Manager's comments/rejection reason (nullable)
-- `finance_id`: ID of finance approver (nullable)
-- `finance_approval_reason`: Finance's comments/rejection reason (nullable)
-
-### Workflow & State Transitions
+### 3. Expense Status Transitions
 ```
-SUBMITTED -> MANAGER_PENDING -> FINANCE_PENDING -> APPROVED
-                 |                   |
-                 +-> REJECTED        +-> REJECTED
+SUBMITTED --[manager approves]--> APPROVED --[finance processes]--> PROCESSED
+SUBMITTED --[manager rejects]--> REJECTED (terminal)
 ```
 
-Rules:
-- Single linear approval path: Employee submits → Manager approves/rejects → Finance approves/rejects
-- Only managers can move claims from `SUBMITTED` to `MANAGER_PENDING` (on approve) or `REJECTED` (on reject)
-- Only finance can move claims from `FINANCE_PENDING` to `APPROVED` or `REJECTED`
-- Rejected claims are final and cannot be resubmitted; employee must create a new claim
-- All state transitions must be recorded with timestamps, user IDs, and rejection reasons
-- No intermediate "processed" state—`APPROVED` is the final state after finance approval
+### 4. Authentication & Authorization Strategy
+- **Token format**: JWT-like base64-encoded JSON payload with `user_id` and `role`
+  - Example payload: `{"user_id": "emp_123", "role": "employee"}`
+  - Example token: `Authorization: Bearer eyJ1c2VyX2lkIjogImVtcF8xMjMiLCAicm9sZSI6ICJlbXBsb3llZSJ9`
+- **Token validation**: Strict - reject requests without valid token
+- **Roles**: `employee`, `manager`, `finance`
+- **Role-based endpoint access**: Each endpoint only accessible to specific role(s)
+- **Self-identification**: Employee can only view/submit their own expenses (via employee_id match in request body)
 
-### API Endpoints & Access Control
+### 5. API Endpoints & Contracts
 
-**Employee Endpoints:**
-- `POST /expenses` — Submit new expense claim (authentication: employee role required)
-- `GET /expenses` — List all own expense claims (optionally filter by status)
-- `GET /expenses/{expense_id}` — View specific own expense claim with full details
+#### Employee Endpoints
+- `POST /expenses` - Submit new expense
+  - Request: `{amount, description}` (employee_id from token)
+  - Response: Full expense object with id and status=SUBMITTED
+  - Auth: employee role only
+  
+- `GET /expenses/{id}` - View specific expense
+  - Response: Full expense object
+  - Auth: employee role, self-owned expenses only
+  
+- `GET /expenses` - List own expenses
+  - Query params: `?status=SUBMITTED&limit=50&offset=0` (optional filters)
+  - Response: List of expense objects
+  - Auth: employee role, filtered to own expenses
 
-**Manager Endpoints:**
-- `GET /expenses` — List all expense claims from direct reports (optionally filter by status)
-- `PATCH /expenses/{expense_id}/approve` — Approve an expense in MANAGER_PENDING state
-- `PATCH /expenses/{expense_id}/reject` — Reject an expense in MANAGER_PENDING state with reason
+#### Manager Endpoints
+- `GET /expenses/pending` - List all SUBMITTED expenses awaiting approval
+  - Query params: `?limit=50&offset=0`
+  - Response: List of SUBMITTED expenses
+  - Auth: manager role only
+  
+- `PUT /expenses/{id}/approve` - Approve an expense
+  - Request: `{manager_notes?}` (optional notes)
+  - Response: Updated expense object with status=APPROVED
+  - Auth: manager role only
+  
+- `PUT /expenses/{id}/reject` - Reject an expense
+  - Request: `{manager_notes}` (required - tell employee why)
+  - Response: Updated expense object with status=REJECTED
+  - Auth: manager role only
 
-**Finance Endpoints:**
-- `GET /expenses` — List all expense claims in FINANCE_PENDING or APPROVED state
-- `PATCH /expenses/{expense_id}/approve` — Approve an expense in FINANCE_PENDING state
-- `PATCH /expenses/{expense_id}/reject` — Reject an expense in FINANCE_PENDING state with reason
+#### Finance Endpoints
+- `GET /expenses/approved` - List all APPROVED expenses awaiting processing
+  - Query params: `?limit=50&offset=0`
+  - Response: List of APPROVED expenses
+  - Auth: finance role only
+  
+- `PUT /expenses/{id}/process` - Mark expense as processed
+  - Request: `{finance_notes?}` (optional processing notes)
+  - Response: Updated expense object with status=PROCESSED
+  - Auth: finance role only
 
-**Access Control Rules:**
-- Managers can only see expenses from employees they manage (based on employee-manager mapping)
-- Finance can see expenses that are in FINANCE_PENDING or APPROVED states
-- Employees can only see their own expenses
-- Employees cannot approve or reject; only managers and finance can
-- Each role gets a mocked identity via `X-User-ID` and `X-User-Role` headers
+### 6. Input Validation Rules
+- `amount`: Required, must be positive number, max $100,000
+- `description`: Required, non-empty, 1-500 characters
+- `employee_id`: Must match authenticated user's ID in token
+- `manager_notes` (on reject): Required, 1-500 characters
+- `manager_notes` (on approve): Optional, 0-500 characters
+- `finance_notes`: Optional, 0-500 characters
+- All state transitions must be valid (can't approve an already-rejected expense, etc.)
 
-### Input Validation
-- **Amount:** Must be positive (> 0)
-- **Category:** Must be one of: Travel, Meals, Equipment, Other
-- **Description:** Must be non-empty string
-- **date_submitted:** Valid ISO 8601 datetime
-- **receipt_url, project_code, department:** Optional strings
-- **User IDs:** Alphanumeric strings from headers (`X-User-ID` and `X-User-Role`)
-- All requests must include valid `X-User-ID` and `X-User-Role` headers
+### 7. Data Storage
+- **In-memory dictionary/list storage** for all expenses
+- **No persistence to disk/database** (as specified)
+- **Expense lookup**: By ID for fast retrieval
+- **Filtering**: In-memory filtering for listing by status, employee_id, etc.
 
-### Error Handling
-- **400 Bad Request:** Invalid input (negative amount, invalid category, empty description, missing required fields)
-- **401 Unauthorized:** Missing or invalid authentication headers
-- **403 Forbidden:** User lacks permission (e.g., employee trying to approve, manager accessing another team's expenses)
-- **404 Not Found:** Expense doesn't exist or user lacks access to it
-- **409 Conflict:** Invalid state transition (e.g., trying to approve already-approved expense, rejecting rejected expense)
-- All errors return descriptive JSON messages for debugging
+### 8. Code Organization
+- `app/` - Main application package
+  - `main.py` - FastAPI app setup, middleware, routes mounting
+  - `models/` - Pydantic models for Expense, API requests/responses
+  - `routes/` - Endpoint handlers organized by feature (expenses, health checks)
+  - `services/` - Business logic (expense workflow state transitions)
+  - `database/` - In-memory store abstraction
+  - `auth/` - Token decoding and role validation middleware
+  - `utils/` - Error handling, validation helpers
+- `tests/` - Test suite
+  - `conftest.py` - Pytest fixtures for test client, auth tokens
+  - `test_auth.py` - Authentication and authorization tests
+  - `test_models.py` - Pydantic model validation tests
+  - `test_store.py` - In-memory storage tests
+  - `test_submit_expense.py` - End-to-end workflow tests
+  - Additional test files for manager and finance workflows
 
-### Code Structure
-```
-app/
-├── main.py                 # FastAPI app initialization, middleware setup
-├── config.py              # Configuration constants
-├── models/
-│   └── expense.py        # Expense claim data models
-├── database/
-│   └── store.py          # In-memory storage implementation
-├── routes/
-│   └── expenses.py       # API endpoint handlers
-├── services/
-│   └── expense_service.py # Business logic & state transitions
-├── auth/
-│   └── middleware.py     # Header-based auth middleware
-├── utils/
-│   └── errors.py         # Custom exception classes
-└── __init__.py
-
-tests/
-├── conftest.py          # Pytest fixtures & setup
-├── test_models.py       # Unit tests for data models
-├── test_service.py      # Unit tests for business logic
-└── test_foundation.py   # Integration tests for API endpoints
-```
-
-### Database/Storage Layer Design
-- Single in-memory dictionary keyed by claim ID
-- Thread-safe operations using locks if needed
-- Supports listing claims with optional status filter
-- Clear separation between storage interface and implementation
+### 9. Testing Approach
+- **Scope**: Unit and integration tests, NO mocking of core business logic
+- **Auth tokens**: Use test fixtures to generate valid tokens for each role
+- **Test data**: Use in-memory store directly in tests
+- **Coverage areas**:
+  - Authentication/authorization (valid/invalid tokens, role restrictions)
+  - Expense submission validation and creation
+  - Workflow state transitions (approve, reject, process)
+  - Self-owned expense access
+  - List filtering (by status, employee)
+  - Error cases (invalid amounts, missing fields, unauthorized access)
+- **Test seam**: High-level integration tests via FastAPI test client (no mocking of auth or services)
 
 ## Testing Decisions
 
 ### What Makes a Good Test
-- Tests external behavior (API contracts and business logic) rather than implementation details
-- Tests are isolated and independent from other tests
-- Tests verify both happy path and error conditions
-- Tests use realistic test data and fixtures
-- Tests run fast and don't depend on external systems
-
-### Testing Strategy
-- **Unit Tests**: Test individual components (models, services) in isolation
-- **Integration Tests**: Test complete API workflows (submit → approve → process)
-- **Fixtures**: Pre-built test data for different user roles and claim states
-- **Coverage Target**: >80% code coverage
-- **Test Framework**: pytest with pytest-asyncio for async endpoint testing
-- **No Mocking**: Test with real in-memory storage to verify integration between layers
+- Tests external behavior (API responses, status codes) rather than implementation details
+- Tests run against real in-memory storage (not mocked)
+- Tests verify both happy path and error scenarios
+- Tests are independent and can run in any order
+- Tests have clear, descriptive names
 
 ### Modules to Test
-1. **Models** (`expense.py`): Data validation and state machine logic
-2. **Services** (`expense_service.py`): Business logic and state transitions
-3. **Routes** (`expenses.py`): API endpoint behavior, access control, error responses
-4. **Middleware** (`middleware.py`): Authentication header parsing and validation
+1. **Authentication**: Token decoding, role extraction, middleware enforcement
+2. **Expense Models**: Pydantic validation for submit/approve/reject/process payloads
+3. **In-memory Store**: CRUD operations, filtering by status/employee
+4. **Expense Service**: State transition logic (can approve SUBMITTED? can process APPROVED?)
+5. **API Endpoints**: All 7 endpoints with valid/invalid inputs, role restrictions
+6. **Workflow Integration**: End-to-end flows (submit → approve → process, submit → reject)
 
-### Test Coverage Areas
-- Creating valid and invalid expense claims
-- Listing claims with role-based filtering
-- Approving, rejecting, and processing claims
-- State transition validation (no invalid transitions)
-- Access control (employees can't approve, finance can't submit, etc.)
-- Error cases (missing headers, wrong role, nonexistent claims)
-- Rejection reason capture and retrieval
+### Prior Art
+- Test client fixture via `TestClient(app)`
+- Parametrized tests for multiple scenarios (different roles, different statuses)
+- Fixtures for test tokens and test expenses
+- Assert response status codes and JSON structure
 
 ## Out of Scope
 
-- **Persistent Storage**: Database integration is out of scope; in-memory storage only
-- **Real Authentication**: JWT tokens, OAuth, or credential validation
-- **Authorization Levels**: No approval thresholds (e.g., auto-approve under $X)
-- **Business Logic Rules**: No expense categories, department codes, or cost center tracking
-- **Attachments/Receipts**: No file upload or receipt storage
-- **Notifications**: No email or push notifications for approvals/rejections
-- **Audit Logging**: No detailed audit trail beyond timestamps and user IDs
-- **Pagination**: List endpoints return all results (acceptable for in-memory storage)
-- **Search/Filtering**: Only basic status filtering; no advanced query capabilities
-- **Multi-tenant**: Single-organization system only
-- **Performance Optimization**: No caching, no query optimization needed for in-memory storage
-
-## Key Assumptions & Constraints
-
-1. **Single-process deployment**: In-memory storage works only for single-process apps; not suitable for distributed systems
-2. **Data loss on restart**: All expenses are lost when the application restarts
-3. **No concurrent modifications**: Assumes low concurrency; no optimistic locking needed for MVP
-4. **Simple user model**: Users have a single immutable role (employee, manager, finance); no role hierarchy
-5. **Synchronous operations**: All operations complete immediately; no async workflows
-6. **Small dataset**: In-memory storage works for hundreds/thousands of expenses; not millions
-7. **Fixed employee-manager mapping**: Managers are statically associated with their direct reports (configured at startup or via fixtures)
-8. **No resubmission support**: Rejected expenses cannot be resubmitted; new submission required
-9. **Linear approval path**: Expenses always follow the same sequence; no approval thresholds or alternate paths
+- **Real authentication/JWT signing**: Token is simple base64-encoded JSON
+- **Database persistence**: All data lost on app restart
+- **Receipt uploads/file handling**: Expense has no receipt field
+- **Delegation/forwarding**: Manager can't delegate approval to another manager
+- **Expense categories**: All expenses treated equally
+- **Amount thresholds**: No different approval rules based on expense amount
+- **Audit logging to external system**: Timestamps tracked in-memory only
+- **Email notifications**: No notifications to employees/managers on state changes
+- **Reporting/analytics**: No dashboard or reporting endpoints
+- **Edit/cancel expenses**: Once submitted, can't be modified or cancelled
+- **Concurrent approval handling**: No locking (not required for in-memory store)
+- **Pagination sorting**: Basic offset/limit only, no sort parameters
 
 ## Further Notes
 
-- This plan follows production-quality code standards: clear separation of concerns, comprehensive error handling, and full test coverage
-- The architecture is designed to be easily testable and maintainable
-- If persistence is needed in the future, the storage layer can be swapped out without changing service or route logic
-- The header-based auth is suitable for development/testing; real deployments should use proper authentication schemes
-- Consider adding request logging/tracing middleware for production observability
+### Future Enhancements (Not in Scope)
+1. Add expense categories and category-based routing rules
+2. Add approval amount thresholds (e.g., > $5,000 requires multiple approvers)
+3. Integrate with real database (PostgreSQL, MongoDB, etc.)
+4. Add real JWT authentication with signing keys
+5. Add email notifications at each workflow stage
+6. Add expense edit/cancel capabilities
+7. Add admin dashboard with reporting and analytics
+8. Add file uploads for receipt images/PDFs
+9. Add expense attachment metadata
+10. Add comment threads for reviewer questions
+
+### Production Readiness Checklist
+- [x] Input validation on all endpoints
+- [x] Role-based access control
+- [x] Clear error messages
+- [x] Comprehensive unit tests
+- [x] Audit trail with timestamps
+- [x] Code organized into logical layers
+- [x] No hardcoded secrets (mock auth uses no secrets)
+- [ ] Logging/monitoring (can add later)
+- [ ] Rate limiting (can add later)
+- [ ] CORS configuration (can add later)
+- [ ] API documentation/OpenAPI (can add later)
+
+### Dependencies
+```
+fastapi==0.104.x
+uvicorn==0.24.x
+pydantic==2.x
+pytest==7.x
+httpx==0.25.x (for test client)
+python-multipart (if form data needed)
+```
+
+---
+
+**Status**: Ready for implementation via feature slices  
+**Last Updated**: 2026-06-29

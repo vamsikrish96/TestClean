@@ -5,14 +5,21 @@ description: Implement feature slices from /to-issues. Writes code with /clean-c
 
 Implement feature slices one by one with testing, code review, and git commits.
 
-## ⚠️ NON-NEGOTIABLE REQUIREMENT
+## ⚠️ NON-NEGOTIABLE REQUIREMENTS
 
-**GitHub commit to remote is MANDATORY after every feature slice.** After each slice passes clean code review:
-1. GitHub remote MUST be configured (`git remote -v`)
-2. Code MUST be committed: `git commit -m "[Slice N] <slice-title>"`
-3. Commit MUST be pushed to remote: `git push origin <branch-name>`
+**1. Code review with /feature-slice-reviewer is MANDATORY before every commit.**
+   - After writing code and running tests, MUST invoke /feature-slice-reviewer agent
+   - Code review CANNOT be skipped, deferred, or bypassed
+   - Review findings MUST be addressed before proceeding to commit
+   - This ensures adherence to /clean-code principles for every slice
 
-This is a hard requirement for EVERY feature slice, with no exceptions. If GitHub is not configured, configure it before proceeding.
+**2. GitHub commit to remote is MANDATORY after every feature slice.**
+   - After each slice passes clean code review:
+   - GitHub remote MUST be configured (`git remote -v`)
+   - Code MUST be committed: `git commit -m "[Slice N] <slice-title>"`
+   - Commit MUST be pushed to remote: `git push origin <branch-name>`
+
+Both requirements are hard rules for EVERY feature slice, with no exceptions. If GitHub is not configured, configure it before proceeding.
 
 ## Workflow
 
@@ -22,9 +29,11 @@ For each feature slice (in order, respecting dependencies):
 2. **Mark in-progress** - Update task as currently being worked on
 3. **Write code** - Follow /clean-code principles for implementation
 4. **Run tests** - Execute relevant test suite
-5. **Review** - Invoke /feature-slice-reviewer agent for code review
+5. **Review** - Invoke /feature-slice-reviewer agent for code review **(CANNOT BE SKIPPED)**
 6. **If approved** → **COMMIT TO REMOTE GITHUB (NON-NEGOTIABLE)**, mark task completed
-7. **If changes needed** → Apply feedback, re-test, and re-review
+7. **If changes needed** → Apply feedback, re-test, and re-review (return to step 5)
+
+⚠️ **Step 5 (Review) is mandatory and cannot be deferred or skipped for any reason.**
 
 ## Key Features
 
