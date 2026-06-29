@@ -1,444 +1,333 @@
-# Clean Code Review — Slice 1 (Foundation: Models, Auth, Storage)
+# Clean Code Review — Slice 1: Foundation
 
-Review date: 2026-06-29
-
----
-
-## Suggestion 1: Remove Magic Number for Bearer Prefix Offset
-
-**Location:** `app/auth.py:20`
-**Clean Code Principle:** Meaningful Names / Avoid Noise — magic numbers hide intent and are fragile
-**Suggested Fix:**
-```python
-# Before
-token = authorization[7:]
-
-# After — option A: use removeprefix (Python 3.9+)
-token = authorization.removeprefix("Bearer ")
-
-# After — option B: named constant
-BEARER_PREFIX = "Bearer "
-token = authorization[len(BEARER_PREFIX):]
-```
-**Rationale:** `7` is a silent assumption that `"Bearer "` is exactly 7 characters. If the prefix ever changes or a reader doesn't know the convention, the number is opaque. `removeprefix` makes the intent explicit and eliminates the literal entirely.
+Reviewed against [Clean Code principles](/clean-code). Only meaningful violations are listed; style-only observations are excluded.
 
 ---
 
-## Suggestion 2: Drop Unused Exception Variable
+## Suggestion 1: Extract Duplicated Guard Pattern in ApprovalService
 
-**Location:** `app/auth.py:30`
-**Clean Code Principle:** Avoid Noise — unused variables are dead code
+**Location:** `app/services.py:91-95`, `117-121`, `144-148`, `170-174`, `197-201`
+
+**Clean Code Principle:** DRY (Don't Repeat Yourself) — every approval and rejection method opens with an identical fetch-and-validate block that changes only the expected status value.
+
 **Suggested Fix:**
+
 ```python
-# Before
-except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as e:
-
-# After
-except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
-```
-**Rationale:** `e` is bound but never referenced. It adds noise that makes readers look for where `e` is used — and finding it nowhere wastes their attention.
-
----
-
-## Suggestion 3: Eliminate Redundant Null Guard in `get_current_user`
-
-**Location:** `app/auth.py:37-43`
-**Clean Code Principle:** Functions Do One Thing / No Duplication — the guard in `get_current_user` is already covered by `decode_token`
-**Suggested Fix:**
-```python
-# Before
-def get_current_user(authorization: Optional[str] = Header(None)) -> TokenPayload:
-    if not authorization:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization header required"
-        )
-    return decode_token(authorization)
-
-# After — delegate fully; decode_token already handles None/empty
-def get_current_user(authorization: Optional[str] = Header(None)) -> TokenPayload:
-    return decode_token(authorization or "")
-```
-**Rationale:** `decode_token` line 14 already guards `if not authorization`. Having two places that raise 401 for missing auth means two places to keep in sync. The outer guard is pure duplication.
-
----
-
-## Suggestion 4: Make Internal Store State Private
-
-**Location:** `app/database.py:7`
-**Clean Code Principle:** Law of Demeter / Objects Hide Data — expose behavior, not internal structure
-**Suggested Fix:**
-```python
-# Before
-self.expenses: dict[str, Expense] = {}
-
-# After
-self._expenses: dict[str, Expense] = {}
-```
-Update all internal references to use `self._expenses`. No external callers should access the raw dict directly; they should go through `get()`, `list_all()`, etc.
-
-**Rationale:** A public `expenses` dict invites callers to bypass the store's methods and manipulate state directly, breaking encapsulation. Prefixing with `_` signals the contract clearly.
-
----
-
-## Suggestion 5: Remove Redundant `list_by_approved` Method
-
-**Location:** `app/database.py:30-31`
-**Clean Code Principle:** Avoid Noise / DRY — the method is a thin wrapper around existing behaviour
-**Suggested Fix:**
-```python
-# Remove entirely:
-def list_by_approved(self) -> List[Expense]:
-    return [exp for exp in self.expenses.values() if exp.status == ExpenseStatus.APPROVED]
-
-# Callers use instead:
-store.list_by_status(ExpenseStatus.APPROVED)
-```
-**Rationale:** `list_by_approved()` is exactly `list_by_status(ExpenseStatus.APPROVED)`. Having a dedicated method for every possible status value would produce unbounded noise. The generic `list_by_status` already covers this case. Remove the specialisation.
-
----
-
-## Suggestion 6: Raise Exception Instead of Returning `None` from `update`
-
-**Location:** `app/database.py:33-38`
-**Clean Code Principle:** Never Return Null — callers should not need to null-check every write operation
-**Suggested Fix:**
-```python
-# Before
-def update(self, expense_id: str, expense: Expense) -> Optional[Expense]:
-    if expense_id in self.expenses:
-        expense.version += 1
-        self.expenses[expense_id] = expense
-        return expense
-    return None
-
-# After
-def update(self, expense_id: str, expense: Expense) -> Expense:
-    if expense_id not in self._expenses:
-        raise KeyError(f"Expense '{expense_id}' not found")
-    expense.version += 1
-    self._expenses[expense_id] = expense
+def _get_expense_in_status(self, expense_id: str, expected_status: ExpenseStatus) -> Expense:
+    expense = self.expense_repo.get_by_id(expense_id)
+    if not expense:
+        raise ValueError("Expense not found")
+    if expense.status != expected_status:
+        raise ValueError(f"Cannot transition expense from {expense.status} status")
     return expense
 ```
-**Rationale:** Returning `None` from a write operation forces every caller to guard against `None`. A `KeyError` (or a domain-specific `ExpenseNotFoundError`) makes the failure explicit and lets callers handle a true error condition, not a silent absence.
+
+Then each method reduces to:
+```python
+def approve_as_manager(self, expense_id: str, manager_id: str) -> Expense:
+    expense = self._get_expense_in_status(expense_id, ExpenseStatus.PENDING)
+    ...
+```
+
+**Rationale:** The guard pattern is copy-pasted verbatim five times. A change to the error message or logic (e.g., adding logging) must be applied in five places. Extracting it to a private helper gives it one reason to change.
 
 ---
 
-## Suggestion 7: Stop Mutating the Caller's Input Object in `update`
+## Suggestion 2: Use Constructor Injection Instead of Module-Level Singletons
 
-**Location:** `app/database.py:35`
-**Clean Code Principle:** Command Query Separation / Predictable Functions — mutating input arguments is a hidden side effect
+**Location:** `app/repositories.py:87-89`, `app/services.py:11-13`, `86-87`, `222-223`
+
+**Clean Code Principle:** F.I.R.S.T. Tests — **Independent**: tests must not share state. Dependency injection enables fresh instances per test.
+
+**Current problem:**
+```python
+# repositories.py
+expense_repo = ExpenseRepository()   # module-level singleton
+history_repo = ExpenseHistoryRepository()
+
+# services.py
+class ExpenseService:
+    def __init__(self):
+        self.expense_repo = expense_repo  # grabs the singleton
+```
+
+`TestExpenseService` and `TestApprovalService` both silently share the same `expense_repo` instance. Expenses submitted in one test are visible to subsequent tests — a hidden ordering dependency.
+
+**Suggested Fix:**
+
+```python
+class ExpenseService:
+    def __init__(
+        self,
+        expense_repo: ExpenseRepository,
+        history_repo: ExpenseHistoryRepository,
+    ):
+        self.expense_repo = expense_repo
+        self.history_repo = history_repo
+```
+
+Tests then instantiate their own clean repos:
+```python
+def test_submit_expense():
+    service = ExpenseService(ExpenseRepository(), ExpenseHistoryRepository())
+    ...
+```
+
+Wire the shared instances in a FastAPI dependency function rather than at import time.
+
+**Rationale:** Module-level mutable singletons are global state. They are the primary reason tests are order-dependent and hard to isolate.
+
+---
+
+## Suggestion 3: `Expense.expense_date` Type Mismatch with Schema
+
+**Location:** `app/models.py:47`, `app/schemas.py:21`, `app/schemas.py:38`
+
+**Clean Code Principle:** Meaningful Names / Type Hints — a field typed as `str` but treated as `date` in schemas misleads readers and bypasses type-checker safety.
+
+**Current state:**
+```python
+# models.py
+expense_date: str   # <-- str
+
+# schemas.py
+expense_date: date  # <-- date object (validated, not future)
+```
+
+The validator in `ExpenseCreateSchema` enforces `date` semantics, but the domain model accepts any string — including `"not-a-date"`. The mismatch means services receive a `date` object from Pydantic but store it as a `str` in the model (or silently coerce it).
+
 **Suggested Fix:**
 ```python
-# Before — mutates the caller's object in place
-expense.version += 1
+# models.py
+from datetime import date
 
-# After — work on a copy
-updated = expense.model_copy(update={"version": expense.version + 1})
-self._expenses[expense_id] = updated
-return updated
+@dataclass
+class Expense:
+    ...
+    expense_date: date   # matches the schema type
 ```
-**Rationale:** After calling `store.update(id, my_expense)`, the caller's `my_expense` object has had its `version` silently incremented. That is a hidden side effect that breaks the predictability of the function. Working on a copy keeps the caller's object unchanged.
+
+**Rationale:** Type consistency between schema and domain model ensures the validator's guarantees flow through the entire system rather than stopping at the API boundary.
 
 ---
 
-## Suggestion 8: Remove Dead and Broken `store` Fixture from `conftest.py`
+## Suggestion 4: `get_expense_with_history` Returns `Optional[dict]` with Magic String Keys
 
-**Location:** `tests/conftest.py:15-17`
-**Clean Code Principle:** Avoid Noise / Zero Dead Code — unused fixtures that are also incorrect are double noise
-**Suggested Fix:**
+**Location:** `app/services.py:73-79`
+
+**Clean Code Principle:** Meaningful Names / Data Structures — raw `dict` with string keys is an untyped contract; callers must know the key names `"expense"` and `"history"` without compiler or IDE help.
+
+**Current state:**
 ```python
-# Remove entirely — no test file references this fixture,
-# and it assigns to app.store (a FastAPI attribute) rather than
-# the module-level `store` used by route handlers in main.py.
-@pytest.fixture
-def store():
-    app.store = ExpenseStore()
-    return app.store
+def get_expense_with_history(self, expense_id: str) -> Optional[dict]:
+    ...
+    return {"expense": expense, "history": history}
 ```
-**Rationale:** The fixture is never imported or used by any test. Additionally, it sets `app.store` (an attribute on the FastAPI object) while `main.py` uses a module-level `store` variable — so even if a test did use it, it would not reset the store the routes actually read from. Dead code that is also misleading is the worst kind.
+
+**Suggested Fix:** Define a small dataclass:
+```python
+@dataclass
+class ExpenseWithHistory:
+    expense: Expense
+    history: List[ExpenseHistory]
+```
+
+Then:
+```python
+def get_expense_with_history(self, expense_id: str) -> Optional[ExpenseWithHistory]:
+    expense = self.expense_repo.get_by_id(expense_id)
+    if not expense:
+        return None
+    history = self.history_repo.get_by_expense_id(expense_id)
+    return ExpenseWithHistory(expense=expense, history=history)
+```
+
+**Rationale:** Typed return values make the contract explicit, enable autocomplete, and eliminate the magic string keys `"expense"` and `"history"` that callers currently depend on.
 
 ---
 
-## Suggestion 9: Assert Specific Exception Type in Auth Tests
+## Suggestion 5: Two `datetime.utcnow()` Calls Per Transaction Create Timestamp Drift
 
-**Location:** `tests/test_auth.py:21, 25, 32, 36, 40, 42`
-**Clean Code Principle:** Single Concept Per Test / Self-Validating — a test that accepts any `Exception` does not validate the specific failure contract
-**Suggested Fix:**
+**Location:** `app/services.py:99+109`, `124+135`, `152+163`, `178+189`, `204+213`
+
+**Clean Code Principle:** Functions Do One Thing — the timestamp used to record `expense.updated_at` and `history.changed_at` should be the same instant. Currently two separate calls can return different microseconds.
+
+**Example (approve_as_manager):**
 ```python
-# Before — too broad
-with pytest.raises(Exception):
-    decode_token(encoded)
-
-# After — verify the exact HTTP error contract
-from fastapi import HTTPException
-
-with pytest.raises(HTTPException) as exc_info:
-    decode_token(encoded)
-assert exc_info.value.status_code == 401
+expense.updated_at = datetime.utcnow()   # call 1 (line 99)
+...
+history = ExpenseHistory(
+    ...
+    changed_at=datetime.utcnow(),        # call 2 (line 109) — potentially different
+)
 ```
-**Rationale:** `pytest.raises(Exception)` passes even if `decode_token` raises a `TypeError`, `AttributeError`, or any other unrelated error. The tests should validate the specific contract: an `HTTPException` with a 401 status code. Otherwise they give false confidence that error handling is correct when it might simply be crashing.
+
+**Suggested Fix:** Capture once at method entry:
+```python
+def approve_as_manager(self, expense_id: str, manager_id: str) -> Expense:
+    now = datetime.utcnow()
+    expense = self._get_expense_in_status(expense_id, ExpenseStatus.PENDING)
+    expense.status = ExpenseStatus.APPROVED_BY_MANAGER
+    expense.approved_by = manager_id
+    expense.updated_at = now
+    self.expense_repo.update(expense)
+    self.history_repo.create(ExpenseHistory(..., changed_at=now))
+    return expense
+```
+
+**Rationale:** The history entry is supposed to record when the expense changed. If `changed_at != expense.updated_at`, audit queries will produce confusing results.
 
 ---
 
-# Clean Code Review — Slice 2 (Employee Submit Expense: POST /expenses)
+## Suggestion 6: `init_test_data()` Must Not Run at Production Startup
 
-Review date: 2026-06-29
+**Location:** `app/main.py:12-15`, `app/repositories.py:92-99`
 
-Reviewed files: `app/main.py`, `tests/test_submit_expense.py`, `tests/conftest.py`
+**Clean Code Principle:** Single Responsibility Principle — the application's startup event is responsible for wiring the app, not seeding fictional test users.
 
----
-
-## Suggestion 10: `client` Fixture Resets `app.store`, Not the Module-Level `store` the Endpoint Uses
-
-**Location:** `tests/conftest.py:11` / `app/main.py:10, 35`
-
-**Clean Code Principle:** F.I.R.S.T. — **Independent** — no test should depend on the state left by another
-
-**The Problem:**
-
+**Current state:**
 ```python
-# conftest.py:11 — sets an attribute on the FastAPI app object
-app.store = ExpenseStore()
-
-# main.py:10 — module-level variable, created once at import time
-store = ExpenseStore()
-
-# main.py:35 — endpoint calls the module-level variable; app.store is never read
-created = store.create(expense)
+@app.on_event("startup")
+def startup_event():
+    init_test_data()  # runs "Alice Employee", "Bob Employee", etc. in production
 ```
 
-Setting `app.store` is a no-op: the endpoint closure captures the module-level `store`, not
-the attribute on `app`. Every test in the suite accumulates state in the same store instance.
-
-**Suggested Fix:** Use FastAPI's dependency-override mechanism so the fixture controls what
-the endpoint actually receives:
-
-```python
-# app/main.py
-store = ExpenseStore()
-
-def get_store() -> ExpenseStore:
-    return store
-
-@app.post("/expenses", response_model=Expense, status_code=status.HTTP_201_CREATED)
-async def submit_expense(
-    submit_data: ExpenseSubmit,
-    token: TokenPayload = Depends(require_role("employee")),
-    expense_store: ExpenseStore = Depends(get_store),
-):
-    expense = Expense(
-        employee_id=token.user_id,
-        amount=submit_data.amount,
-        description=submit_data.description,
-        status=ExpenseStatus.SUBMITTED,
-        submitted_date=datetime.now(timezone.utc),
-    )
-    return expense_store.create(expense)
-```
+**Suggested Fix:** Remove the `startup_event` entirely (or make it a no-op). Move `init_test_data()` to a `conftest.py` fixture that runs only during tests, or to an explicit `seed.py` CLI script for local development.
 
 ```python
 # tests/conftest.py
-from app.main import app, get_store
+import pytest
+from app.repositories import UserRepository, init_test_users
 
 @pytest.fixture
-def client():
-    fresh_store = ExpenseStore()
-    app.dependency_overrides[get_store] = lambda: fresh_store
-    yield TestClient(app)
-    app.dependency_overrides.clear()
+def seeded_user_repo():
+    repo = UserRepository()
+    init_test_users(repo)
+    return repo
 ```
 
-**Rationale:** Without this, tests are order-dependent. Whichever test runs first gets ID
-`exp_000001`; subsequent tests get higher counters. Adding a new test at the top of the
-file silently breaks assertions in all tests below it.
+**Rationale:** Every production deployment currently starts with hardcoded test users. Any code path that loads user data from the repository will return `emp1`, `emp2`, `mgr1`, `fin1` in production — unintended behavior that is also untestable because the startup hook runs implicitly.
 
 ---
 
-## Suggestion 11: Magic String `"exp_000001"` Encodes Hidden Ordering Assumption
+## Suggestion 7: Remove Dead `ApprovalSchema`
 
-**Location:** `tests/test_submit_expense.py:18`
+**Location:** `app/schemas.py:58-60`
 
-**Clean Code Principle:** No Magic Values — unexplained literals encode hidden assumptions and couple tests to implementation details
+**Clean Code Principle:** Zero Noise — dead code left in place signals ambiguity about whether it is intentional or forgotten.
 
-**The Problem:**
-
+**Current state:**
 ```python
-assert data["id"] == "exp_000001"
+class ApprovalSchema(BaseModel):
+    action: str          # no validation, no consumer
+    timestamp: datetime  # never populated anywhere
 ```
 
-This encodes two facts that belong to the implementation, not the behavioral contract:
-1. The store counter starts at 1.
-2. The ID is zero-padded to 6 digits.
+This schema has no endpoint, no serialization call, and no tests. `action: str` is too vague to be useful as-is.
 
-If the store is not reset (see Suggestion 10), this assertion breaks on any test that creates
-an expense before it.
+**Suggested Fix:** Delete the class. If an approval-action response schema is needed in a later slice, define it there with the correct fields.
 
-**Suggested Fix:** Assert the structural contract — that an ID was assigned — not the
-exact value:
-
-```python
-assert data["id"] is not None
-assert data["id"].startswith("exp_")
-```
-
-If the zero-padding format is a public contract worth testing, do so in a dedicated store
-unit test, not in the HTTP endpoint test.
-
-**Rationale:** Assertions against internal counter values couple the test to the store's
-private counter. They will fail on any refactor of ID generation even when the API contract
-is unchanged.
+**Rationale:** Unused code adds cognitive load — readers spend time wondering whether it is intentional scaffolding, a mistake, or a hint about future behaviour.
 
 ---
 
-## Suggestion 12: `test_submit_valid_expense` Tests Multiple Concepts in One Function
+## Suggestion 8: Make Repository Internal Storage Private
 
-**Location:** `tests/test_submit_expense.py:4-19`
+**Location:** `app/repositories.py:11`, `49`, `66`
 
-**Clean Code Principle:** Single Concept Per Test — one test, one reason to fail
+**Clean Code Principle:** Objects Hide Internal State — a public `storage` attribute invites callers to bypass the repository's query interface and manipulate the dict directly.
 
-**The Problem:**
-
-`test_submit_valid_expense` makes six assertions covering distinct behavioral outcomes:
-
+**Current state:**
 ```python
-assert data["employee_id"] == "emp_001"          # token claim is mapped to expense
-assert data["amount"] == 150.50                   # input fields are echoed
-assert data["description"] == "Conference ticket" # input fields are echoed
-assert data["status"] == ExpenseStatus.SUBMITTED  # initial status is set correctly
-assert data["id"] == "exp_000001"                 # ID is assigned (+ magic value)
-assert data["submitted_date"] is not None         # timestamp is stamped
+class ExpenseRepository:
+    def __init__(self):
+        self.storage: Dict[str, Expense] = {}  # public
 ```
-
-A failure message says "AssertionError" but does not identify which behavioral contract
-broke.
-
-**Suggested Fix:** Break into focused tests named after what they verify:
-
-```python
-def test_submit_expense_maps_employee_id_from_token(client, employee_token):
-    data = _submit_valid(client, employee_token)
-    assert data["employee_id"] == "emp_001"
-
-def test_submit_expense_sets_status_to_submitted(client, employee_token):
-    data = _submit_valid(client, employee_token)
-    assert data["status"] == ExpenseStatus.SUBMITTED
-
-def test_submit_expense_stamps_submitted_date(client, employee_token):
-    data = _submit_valid(client, employee_token)
-    assert data["submitted_date"] is not None
-
-def test_submit_expense_echoes_input_fields(client, employee_token):
-    payload = {"amount": 150.50, "description": "Conference ticket"}
-    data = client.post("/expenses", json=payload, headers={"Authorization": employee_token}).json()
-    assert data["amount"] == 150.50
-    assert data["description"] == "Conference ticket"
-
-def _submit_valid(client, token):
-    return client.post(
-        "/expenses",
-        json={"amount": 100, "description": "Test"},
-        headers={"Authorization": token},
-    ).json()
-```
-
-**Rationale:** Each test name now documents the behavioral contract in plain English. A
-failing test immediately identifies which contract broke without reading the assertion body.
-
----
-
-## Suggestion 13: Duplicate Tests Add Noise Without Adding Coverage
-
-**Location:** `tests/test_submit_expense.py:152-162` and `164-173`
-
-**Clean Code Principle:** Eliminate Noise / DRY — redundant tests increase maintenance burden without increasing confidence
-
-**The Problem:**
-
-`test_submit_stores_with_submitted_status` (line 152) and `test_employee_id_from_token`
-(line 164) each assert a single fact already asserted by `test_submit_valid_expense`:
-
-- line 152-162 duplicates `test_submit_valid_expense:17` (`status == SUBMITTED`)
-- line 164-173 duplicates `test_submit_valid_expense:14` (`employee_id == "emp_001"`)
-
-**Suggested Fix:** Delete both functions. After splitting `test_submit_valid_expense` per
-Suggestion 12, these behaviors will each have a dedicated, named test.
-
-**Rationale:** Duplicate assertions mean a behavior change requires updating multiple tests.
-They also mislead readers into thinking these are testing something distinct when they are not.
-
----
-
-## Suggestion 14: POST /expenses Returns 200 Instead of 201 Created
-
-**Location:** `app/main.py:23`
-
-**Clean Code Principle:** Intention-Revealing Code — the response code is part of the API contract and must reflect what actually happened
-
-**The Problem:**
-
-```python
-@app.post("/expenses", response_model=Expense)  # defaults to 200 OK
-```
-
-RFC 9110 (HTTP Semantics) defines `201 Created` for successful resource creation. Returning
-`200 OK` signals that a query was answered, not that a resource was created. Clients using
-the status code to distinguish creation from retrieval will misread the response.
 
 **Suggested Fix:**
-
 ```python
-from fastapi import status
+class ExpenseRepository:
+    def __init__(self):
+        self._storage: Dict[str, Expense] = {}
 
-@app.post("/expenses", response_model=Expense, status_code=status.HTTP_201_CREATED)
+    def create(self, expense: Expense) -> Expense:
+        self._storage[expense.id] = expense
+        return expense
+    # ... etc.
 ```
 
-Update test assertions from `== 200` to `== 201` in `test_submit_expense.py:12` and
-`test_submit_max_valid_amount:125` and `test_submit_max_description_length:137`.
-
-**Rationale:** HTTP status codes are the API's vocabulary. Using `200` where `201` is
-correct is the equivalent of a function named `get` that also creates a record — the
-name contradicts the behavior.
+**Rationale:** Callers should interact only through `create`, `get_by_id`, `update`, and `list_*` methods. Exposing `storage` publicly means any code (including tests) can insert or mutate records without going through the defined interface, defeating the repository abstraction.
 
 ---
 
-## Suggestion 15: Identical Role-Forbidden Tests Should Be Parameterized
+## Suggestion 9: Extract Expense Test Fixture to Eliminate Repetition
 
-**Location:** `tests/test_submit_expense.py:98-115`
+**Location:** `tests/test_foundation.py:46-55`, `62-79`, `87-97`, `109-116`, `172-179`, `187-194`, `206-213`, `240-247`
 
-**Clean Code Principle:** DRY / Eliminate Noise — copy-pasted test functions diverge silently over time
+**Clean Code Principle:** DRY — the same `Expense(...)` construction (7 required keyword arguments) is copy-pasted across at least eight test methods.
 
-**The Problem:**
-
-`test_submit_as_manager_forbidden` and `test_submit_as_finance_forbidden` differ only in
-the fixture they use. Adding a third non-employee role requires copy-pasting a third function.
-
-**Suggested Fix:**
+**Suggested Fix:** Add a factory function (or pytest fixture) at the top of the test file:
 
 ```python
-@pytest.mark.parametrize("token_fixture", ["manager_token", "finance_token"])
-def test_submit_expense_forbidden_for_non_employees(request, client, token_fixture):
-    token = request.getfixturevalue(token_fixture)
-    response = client.post(
-        "/expenses",
-        json={"amount": 100, "description": "Test"},
-        headers={"Authorization": token},
+def make_expense(
+    id: str = "exp1",
+    employee_id: str = "emp1",
+    amount: float = 100.0,
+    category: ExpenseCategory = ExpenseCategory.TRAVEL,
+    description: str = "Flight to NYC",
+    expense_date: str = "2026-06-15",
+    receipt_url: str = "https://example.com/receipt.pdf",
+) -> Expense:
+    return Expense(
+        id=id,
+        employee_id=employee_id,
+        amount=amount,
+        category=category,
+        description=description,
+        expense_date=expense_date,
+        receipt_url=receipt_url,
     )
-    assert response.status_code == 403
 ```
 
-**Rationale:** A new role is a one-word addition to the parametrize list. Two identical
-functions diverge when one is updated and the other is not, eroding test reliability silently.
+Tests then read as:
+```python
+expense = make_expense(id="exp2", employee_id="emp2")
+```
+
+**Rationale:** If `Expense.__init__` gains or renames a required field, every test currently needs a manual update. A factory centralises the construction in one place and makes the *variation* between test cases immediately visible.
 
 ---
 
-## Slice 2 Summary
+## Suggestion 10: Initial History Entry Records a Meaningless No-Op Transition
 
-| # | Severity | Location | Principle |
-|---|----------|----------|-----------|
-| 10 | High | `conftest.py:11` / `main.py:10,35` | F.I.R.S.T. Independent |
-| 11 | High | `test_submit_expense.py:18` | No Magic Values |
-| 12 | Medium | `test_submit_expense.py:4-19` | Single Concept Per Test |
-| 13 | Medium | `test_submit_expense.py:152-173` | Eliminate Noise / DRY |
-| 14 | Medium | `main.py:23` | Intention-Revealing Code |
-| 15 | Low | `test_submit_expense.py:98-115` | DRY |
+**Location:** `app/services.py:44-53`
+
+**Clean Code Principle:** Meaningful Names — `status_from=PENDING, status_to=PENDING` records "nothing changed," which misleads audit consumers.
+
+**Current state:**
+```python
+history = ExpenseHistory(
+    ...
+    status_from=ExpenseStatus.PENDING,
+    status_to=ExpenseStatus.PENDING,   # same as from — no transition
+    comment="Expense submitted",
+)
+```
+
+**Suggested Fix:** Allow `status_from` to be `Optional[ExpenseStatus]` (representing "did not exist before"), or add a `SUBMITTED` comment-only entry pattern:
+
+```python
+# Option A — nullable status_from to signal creation
+# models.py
+status_from: Optional[ExpenseStatus]
+
+# services.py
+history = ExpenseHistory(
+    status_from=None,
+    status_to=ExpenseStatus.PENDING,
+    comment="Expense submitted",
+    ...
+)
+```
+
+**Rationale:** An audit trail where `from == to` looks like a data error to anyone querying the history. The initial submission is a creation event, not a status transition, and the history entry should reflect that.

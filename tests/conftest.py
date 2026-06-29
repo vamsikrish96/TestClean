@@ -1,18 +1,12 @@
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
-from app.repositories import expense_repo, history_repo, user_repo
+from app.repositories import expense_repo, history_repo, user_repo, init_test_data
 from app.models import User, UserRole
 
 
-@pytest.fixture
-def client():
-    """Create a test client for the FastAPI app."""
-    return TestClient(app)
-
-
-@pytest.fixture
-def clear_repos():
+@pytest.fixture(autouse=True)
+def clear_repos_fixture():
     """Clear all repositories before and after each test."""
     expense_repo.storage.clear()
     history_repo.storage.clear()
@@ -24,12 +18,15 @@ def clear_repos():
 
 
 @pytest.fixture
-def setup_users(clear_repos):
+def client():
+    """Create a test client for the FastAPI app."""
+    return TestClient(app)
+
+
+@pytest.fixture
+def setup_users():
     """Create test users for testing."""
-    user_repo.create(User(id="emp1", name="Alice Employee", role=UserRole.EMPLOYEE, manager_id="mgr1"))
-    user_repo.create(User(id="emp2", name="Bob Employee", role=UserRole.EMPLOYEE, manager_id="mgr1"))
-    user_repo.create(User(id="mgr1", name="Charlie Manager", role=UserRole.MANAGER))
-    user_repo.create(User(id="fin1", name="Diana Finance", role=UserRole.FINANCE))
+    init_test_data()
     return {
         "emp1": "emp1:employee",
         "emp2": "emp2:employee",

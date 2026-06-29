@@ -44,7 +44,7 @@ class Expense:
     amount: float
     category: ExpenseCategory
     description: str
-    expense_date: str
+    expense_date: str  # ISO format string
     receipt_url: str
     status: ExpenseStatus = ExpenseStatus.PENDING
     created_at: datetime = field(default_factory=datetime.utcnow)

@@ -94,9 +94,10 @@ class ApprovalService:
         if expense.status != ExpenseStatus.PENDING:
             raise ValueError(f"Cannot approve expense in {expense.status} status")
 
+        now = datetime.utcnow()
         expense.status = ExpenseStatus.APPROVED_BY_MANAGER
         expense.approved_by = manager_id
-        expense.updated_at = datetime.utcnow()
+        expense.updated_at = now
 
         self.expense_repo.update(expense)
 
@@ -106,7 +107,7 @@ class ApprovalService:
             status_from=ExpenseStatus.PENDING,
             status_to=ExpenseStatus.APPROVED_BY_MANAGER,
             changed_by=manager_id,
-            changed_at=datetime.utcnow(),
+            changed_at=now,
         )
         self.history_repo.create(history)
 
@@ -120,9 +121,10 @@ class ApprovalService:
         if expense.status != ExpenseStatus.PENDING:
             raise ValueError(f"Cannot reject expense in {expense.status} status")
 
+        now = datetime.utcnow()
         expense.status = ExpenseStatus.REJECTED
         expense.rejection_reason = rejection_reason
-        expense.updated_at = datetime.utcnow()
+        expense.updated_at = now
 
         self.expense_repo.update(expense)
 
@@ -132,7 +134,7 @@ class ApprovalService:
             status_from=ExpenseStatus.PENDING,
             status_to=ExpenseStatus.REJECTED,
             changed_by=manager_id,
-            changed_at=datetime.utcnow(),
+            changed_at=now,
             comment=rejection_reason,
         )
         self.history_repo.create(history)
@@ -147,9 +149,10 @@ class ApprovalService:
         if expense.status != ExpenseStatus.APPROVED_BY_MANAGER:
             raise ValueError(f"Cannot approve expense in {expense.status} status")
 
+        now = datetime.utcnow()
         expense.status = ExpenseStatus.APPROVED_BY_FINANCE
         expense.approved_by = finance_id
-        expense.updated_at = datetime.utcnow()
+        expense.updated_at = now
 
         self.expense_repo.update(expense)
 
@@ -159,7 +162,7 @@ class ApprovalService:
             status_from=ExpenseStatus.APPROVED_BY_MANAGER,
             status_to=ExpenseStatus.APPROVED_BY_FINANCE,
             changed_by=finance_id,
-            changed_at=datetime.utcnow(),
+            changed_at=now,
         )
         self.history_repo.create(history)
 
@@ -173,9 +176,10 @@ class ApprovalService:
         if expense.status != ExpenseStatus.APPROVED_BY_MANAGER:
             raise ValueError(f"Cannot reject expense in {expense.status} status")
 
+        now = datetime.utcnow()
         expense.status = ExpenseStatus.REJECTED
         expense.rejection_reason = rejection_reason
-        expense.updated_at = datetime.utcnow()
+        expense.updated_at = now
 
         self.expense_repo.update(expense)
 
@@ -185,7 +189,7 @@ class ApprovalService:
             status_from=ExpenseStatus.APPROVED_BY_MANAGER,
             status_to=ExpenseStatus.REJECTED,
             changed_by=finance_id,
-            changed_at=datetime.utcnow(),
+            changed_at=now,
             comment=rejection_reason,
         )
         self.history_repo.create(history)
@@ -200,8 +204,9 @@ class ApprovalService:
         if expense.status != ExpenseStatus.APPROVED_BY_FINANCE:
             raise ValueError(f"Cannot process expense in {expense.status} status")
 
+        now = datetime.utcnow()
         expense.status = ExpenseStatus.PROCESSED
-        expense.updated_at = datetime.utcnow()
+        expense.updated_at = now
 
         self.expense_repo.update(expense)
 
@@ -211,7 +216,7 @@ class ApprovalService:
             status_from=ExpenseStatus.APPROVED_BY_FINANCE,
             status_to=ExpenseStatus.PROCESSED,
             changed_by=finance_id,
-            changed_at=datetime.utcnow(),
+            changed_at=now,
         )
         self.history_repo.create(history)
 
