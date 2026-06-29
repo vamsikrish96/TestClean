@@ -1,40 +1,38 @@
-import base64
-import json
 import pytest
 from fastapi.testclient import TestClient
-from app.main import app, get_store
-from app.database import ExpenseStore
+from app.main import app
+from app.repositories import expense_repo, history_repo, user_repo
+from app.models import User, UserRole
 
 
 @pytest.fixture
 def client():
-    store = ExpenseStore()
-    app.dependency_overrides[get_store] = lambda: store
-    yield TestClient(app)
-    app.dependency_overrides.clear()
-
-
-def create_token(user_id: str, role: str) -> str:
-    payload = {"user_id": user_id, "role": role}
-    encoded = base64.b64encode(json.dumps(payload).encode()).decode()
-    return f"Bearer {encoded}"
+    """Create a test client for the FastAPI app."""
+    return TestClient(app)
 
 
 @pytest.fixture
-def employee_token():
-    return create_token("emp_001", "employee")
+def clear_repos():
+    """Clear all repositories before and after each test."""
+    expense_repo.storage.clear()
+    history_repo.storage.clear()
+    user_repo.storage.clear()
+    yield
+    expense_repo.storage.clear()
+    history_repo.storage.clear()
+    user_repo.storage.clear()
 
 
 @pytest.fixture
-def manager_token():
-    return create_token("mgr_001", "manager")
-
-
-@pytest.fixture
-def finance_token():
-    return create_token("fin_001", "finance")
-
-
-@pytest.fixture
-def admin_token():
-    return create_token("adm_001", "admin")
+def setup_users(clear_repos):
+    """Create test users for testing."""
+    user_repo.create(User(id="emp1", name="Alice Employee", role=UserRole.EMPLOYEE, manager_id="mgr1"))
+    user_repo.create(User(id="emp2", name="Bob Employee", role=UserRole.EMPLOYEE, manager_id="mgr1"))
+    user_repo.create(User(id="mgr1", name="Charlie Manager", role=UserRole.MANAGER))
+    user_repo.create(User(id="fin1", name="Diana Finance", role=UserRole.FINANCE))
+    return {
+        "emp1": "emp1:employee",
+        "emp2": "emp2:employee",
+        "mgr1": "mgr1:manager",
+        "fin1": "fin1:finance",
+    }

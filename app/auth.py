@@ -1,56 +1,42 @@
-import base64
-import json
-from typing import Optional, Callable
-from fastapi import Header, HTTPException, status, Depends
-
-BEARER_PREFIX = "Bearer "
+from typing import Optional
+from fastapi import Depends, HTTPException, Request
+from app.models import UserRole
+from app.schemas import CurrentUserSchema
 
 
-class TokenPayload:
-    def __init__(self, user_id: str, role: str):
-        self.user_id = user_id
-        self.role = role
+def extract_bearer_token(request: Request) -> str:
+    """Extract Bearer token from Authorization header."""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header missing")
+
+    parts = auth_header.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Invalid Authorization header format")
+
+    return parts[1]
 
 
-def decode_token(authorization: str) -> TokenPayload:
-    if not authorization or not authorization.startswith(BEARER_PREFIX):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid authorization header"
-        )
-
-    token = authorization[len(BEARER_PREFIX):]
+def parse_mocked_token(token: str) -> CurrentUserSchema:
+    """Parse mocked JWT token with format: user_id:role."""
     try:
-        payload_bytes = base64.b64decode(token)
-        payload_str = payload_bytes.decode('utf-8')
-        payload = json.loads(payload_str)
-
-        if 'user_id' not in payload or 'role' not in payload:
-            raise ValueError("Missing required fields in token")
-
-        return TokenPayload(user_id=payload['user_id'], role=payload['role'])
-    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token format"
-        )
+        user_id, role_str = token.split(":")
+        role = UserRole(role_str.lower())
+        return CurrentUserSchema(user_id=user_id, role=role)
+    except (ValueError, KeyError):
+        raise HTTPException(status_code=401, detail="Invalid token format. Expected user_id:role")
 
 
-def get_current_user(authorization: Optional[str] = Header(None)) -> TokenPayload:
-    if not authorization:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization header required"
-        )
-    return decode_token(authorization)
+def get_current_user(request: Request) -> CurrentUserSchema:
+    """Dependency to extract and validate current user from Bearer token."""
+    token = extract_bearer_token(request)
+    return parse_mocked_token(token)
 
 
-def require_role(*allowed_roles: str) -> Callable:
-    def role_checker(token: TokenPayload = Depends(get_current_user)) -> TokenPayload:
-        if token.role not in allowed_roles:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Access denied. Required role: {', '.join(allowed_roles)}"
-            )
-        return token
-    return role_checker
+def require_role(*allowed_roles: UserRole):
+    """Dependency factory to check if user has required role."""
+    def check_role(current_user: CurrentUserSchema = Depends(get_current_user)) -> CurrentUserSchema:
+        if current_user.role not in allowed_roles:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return current_user
+    return check_role

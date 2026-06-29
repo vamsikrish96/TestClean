@@ -1,305 +1,299 @@
-# Expense Approval Workflow API — Implementation Plan
-
-**Date:** 2026-06-29  
-**Status:** Ready for Implementation  
-**Slicing Strategy:** Vertical feature slices with independent, testable workflows
-
----
+# Expense Approval Workflow API - Implementation Plan
 
 ## Problem Statement
 
-Organizations need a streamlined expense approval workflow where:
-- Employees can submit expense claims without manual intervention
-- Managers can review and approve/reject claims for their team members
-- Finance can process approved claims for reimbursement
-- All parties can track the status and audit history of expenses
-- The system enforces role-based access control and validation rules
-
-Current state: Slices 1-4 have implemented the foundation (FastAPI setup, auth middleware, employee submission, and expense viewing). Remaining: Manager approval, Finance processing, and audit trail integration.
-
----
+Organizations need a streamlined process for employees to submit expense claims and for managers/finance teams to review, approve, and process those claims. Currently, manual tracking via email or spreadsheets creates bottlenecks, loss of accountability, and limited visibility into claim status.
 
 ## Solution
 
-Extend the existing FastAPI-based Expense Approval Workflow API with two new feature slices:
+Build a production-quality FastAPI-based REST API that:
+- Allows employees to submit expense claims with required details (amount, category, description, expense date, receipt URL)
+- Enables managers to approve/reject claims from their team members
+- Allows finance to process approved claims
+- Provides employees with complete visibility into their claims' status and full approval workflow history
+- Maintains a complete audit trail of all state transitions with timestamps, approvers, and rejection reasons
+- Supports enterprise scale (1000+ employees) with role-based access control (employee, manager, finance)
 
-**Slice 5: Manager Approval Workflow**
-- Managers can view pending expenses from their direct reports only
-- Managers can approve or reject expenses with optional notes
-- Rejected expenses require full resubmission (not editable)
-- Audit trail captures approver, timestamp, and notes
+## Requirements
 
-**Slice 6: Finance Processing Workflow**
-- Finance can view all approved expenses awaiting processing
-- Finance can mark expenses as processed (completed) or return to manager (for re-review)
-- Processing captures timestamp and optional notes
-- Finance users have system-wide visibility
+### Functional Requirements
 
----
+#### Expense Submission (Employee)
+1. Employee submits a new expense with required fields:
+   - Amount (0 < amount ≤ $100,000)
+   - Category (Travel, Meals, Equipment, Other)
+   - Description (text)
+   - Expense Date (≤ today)
+   - Receipt URL (mandatory)
+2. System validates all inputs and returns validation errors if invalid
+3. Expense starts in "pending" status, waiting for manager approval
+4. Employee can only see their own submitted expenses
 
-## User Stories
+#### Expense Viewing (Employee)
+1. Employee can list their own expenses with filtering by status
+2. Employee can view detail of a single expense including:
+   - Current expense data
+   - Complete audit trail showing each approval step (who, when, action, any comments)
+3. If rejected, employee sees the rejection reason
 
-1. As an **employee**, I want to submit an expense with amount, description, and optional receipt reference, so that I can request reimbursement.
+#### Expense Approval (Manager)
+1. Manager can list expenses pending approval from their direct reports
+2. Manager can list all expenses (with various status filters) from their team
+3. Manager can approve an expense (transitions to "approved_by_manager")
+4. Manager can reject an expense with a mandatory rejection reason
+5. Manager can only approve/reject expenses from their direct reports
 
-2. As an **employee**, I want to view all my submitted expenses with their current status (SUBMITTED, APPROVED, REJECTED, PROCESSED), so that I can track my reimbursements.
+#### Expense Processing (Finance)
+1. Finance can list all expenses in "approved_by_manager" status
+2. Finance can view expense details with full audit trail
+3. Finance can approve an expense (transitions to "approved_by_finance")
+4. Finance can reject an expense with a mandatory rejection reason (returns to awaiting manager review or terminal rejected)
+5. Finance can mark an expense as "processed" (final state)
 
-3. As an **employee**, I want to see who approved/rejected my expense and when, so that I can understand the workflow progress.
+#### Audit Trail
+1. Every status transition is recorded with:
+   - From status
+   - To status
+   - Who made the change (user_id)
+   - When the change occurred (timestamp)
+   - Comment/rejection reason (mandatory if rejecting)
+2. Full audit trail is visible to employee who submitted the claim
 
-4. As an **employee**, I want to resubmit a new expense if my previous one was rejected, so that I can address the manager's concerns.
+### Non-Functional Requirements
+1. Production-quality code following clean code principles
+2. Comprehensive unit and integration tests with 80%+ coverage
+3. Input validation on all endpoints
+4. Mocked authentication (no real JWT signing, but token format validated)
+5. In-memory data storage (no external database)
+6. Modular architecture: auth, services, and data layers as separate concerns
+7. Enterprise scale support (1000+ employees)
 
-5. As an **employee**, I want validation to prevent me from submitting invalid expenses (negative amounts, missing descriptions, future dates), so that I don't waste manager time on malformed requests.
+## Architectural Decisions
 
-6. As a **manager**, I want to view all pending (SUBMITTED) expenses from my direct reports, so that I can approve them efficiently.
+### Authentication & Authorization
+**Decision**: Use Bearer token authentication with embedded user_id and role (mocked JWT format).
 
-7. As a **manager**, I want to approve an expense with optional notes, so that I can move it forward in the workflow.
+**Rationale**: Allows testing without real JWT infrastructure while maintaining realistic token-based auth pattern. Simpler than session-based auth for stateless API.
 
-8. As a **manager**, I want to reject an expense with required notes, so that I can give the employee feedback on why it was rejected.
+**Implementation**:
+- Authorization header format: `Authorization: Bearer <user_id>:<role>`
+- Supported roles: `employee`, `manager`, `finance`
+- Middleware extracts user from header on every request
+- Returns 401 if header missing, 403 if role lacks permission
+- No real JWT signing; tokens are validated structurally
 
-9. As a **manager**, I want to ensure I cannot accidentally approve my own expense, so that there's no self-approval loophole.
+### Workflow State Machine
+**Decision**: Three-stage linear workflow: Employee → Manager → Finance
 
-10. As a **manager**, I want to be prevented from modifying an expense that has already been approved/rejected, so that the workflow cannot be reversed accidentally.
+**Rationale**: Matches typical organizational approval hierarchies; simple enough to implement v1 but realistic for enterprise use.
 
-11. As a **finance user**, I want to view all approved expenses awaiting processing, so that I can process them for payment.
+**States**:
+- `pending` — waiting for manager approval
+- `approved_by_manager` — manager approved, awaiting finance review
+- `approved_by_finance` — finance approved, ready for processing/payout
+- `rejected` — rejected by manager or finance (terminal state)
+- `processed` — finance marked as processed (terminal state)
 
-12. As a **finance user**, I want to mark an expense as processed after verification, so that it's marked complete for accounting purposes.
+**Transitions**:
+- Employee submits → `pending`
+- Manager approves → `approved_by_manager`
+- Manager rejects → `rejected` (with mandatory reason)
+- Finance approves → `approved_by_finance`
+- Finance rejects → `rejected` (with mandatory reason)
+- Finance processes → `processed`
 
-13. As a **finance user**, I want to return an approved expense to the manager (not the employee) if there's a compliance issue, so that the manager can re-review it.
+### Data Model
+**Decision**: Separate Expense and ExpenseHistory records for current state and full audit trail.
 
-14. As a **finance user**, I want to add notes when processing or returning an expense, so that there's a record of why the action was taken.
+**Rationale**: Enables efficient queries for current expenses while maintaining complete, immutable audit trail.
 
-15. As a **finance user**, I want system-wide visibility across all expenses regardless of employee/manager, so that I can process all approved claims.
+**Expense Entity**:
+- `id` (UUID)
+- `employee_id` (who submitted)
+- `amount` (decimal, validated: 0 < amount ≤ 100,000)
+- `category` (enum: Travel, Meals, Equipment, Other)
+- `description` (string)
+- `expense_date` (date, ≤ today)
+- `receipt_url` (string, mandatory)
+- `status` (current state)
+- `created_at` (timestamp)
+- `updated_at` (timestamp)
+- `approved_by` (user_id of approver, nullable)
+- `rejection_reason` (string, nullable, required if rejected)
 
-16. As an **admin**, I want to view all expenses across all employees and statuses, so that I can audit the entire workflow.
+**ExpenseHistory Entity**:
+- `id` (UUID)
+- `expense_id` (reference to Expense)
+- `status_from` (previous status)
+- `status_to` (new status)
+- `changed_by` (who made the change)
+- `changed_at` (timestamp)
+- `comment` (rejection reason or approver note)
 
-17. As any **system user**, I want the audit trail to show who took each action (approve, reject, process, return) with timestamps and notes, so that the workflow is fully traceable.
+### Modular Architecture
+**Decision**: Organize code into distinct modules: auth, services, repositories, schemas, models, and API routes.
 
-18. As a **system administrator**, I want rejected expenses to require full resubmission (not editable), so that there's no ambiguity about which version is being reviewed.
+**Rationale**: Enables independent testing, clear separation of concerns, and easier long-term maintenance and scaling.
 
-19. As a **developer maintaining the system**, I want comprehensive tests covering happy paths, sad paths, and corner cases (concurrent updates, self-approval attempts, role violations), so that the workflow is reliable in production.
+**Module Structure**:
+```
+app/
+├── models/           # Data models (Expense, ExpenseHistory, User)
+├── schemas/          # Pydantic request/response schemas
+├── auth/             # Authentication middleware, JWT parsing
+├── repositories/     # Data access layer (in-memory storage)
+├── services/         # Business logic (ExpenseService, ApprovalService)
+├── api/              # Route handlers and endpoint definitions
+└── main.py           # FastAPI app initialization and startup
+```
 
-20. As a **developer**, I want role-based access control enforced at every endpoint, so that employees cannot view manager/finance endpoints and vice versa.
+### In-Memory Storage
+**Decision**: Use Python dicts/lists for data persistence (no external database).
 
-## Implementation Decisions
+**Rationale**: Simpler to test and deploy; acceptable for MVP/validation; scales to enterprise scale via efficient indexing.
 
-### 1. **Expense State Machine & Workflow**
-- **States:** SUBMITTED → APPROVED or REJECTED → (if APPROVED) → PROCESSED or RETURNED
-- **Rejected expenses:** Require full resubmission (no editing of rejected expense)
-- **Returned expenses:** Sent back to Manager (not Employee) for re-review from APPROVED state
-- **Rationale:** Clean state transitions prevent ambiguity; requiring resubmission on rejection ensures clear intent
+**Implementation**:
+- Expense repository uses dict keyed by expense_id
+- ExpenseHistory repository uses dict with lists of history records per expense_id
+- User repository stores employee-manager relationships and role mappings
+- All data is lost on application restart (acceptable for this MVP)
 
-### 2. **Role-Based Access Control**
-- **Employees:** Can submit expenses and view their own expenses only
-- **Managers:** Can view/approve/reject ONLY expenses from direct reports (enforced by manager_id relationship on Employee records)
-- **Finance:** Can view all APPROVED expenses and process/return them; visibility is system-wide
-- **Admin:** Can view all expenses regardless of status or employee
-- **Self-approval prevention:** Any user attempting to approve their own expense receives HTTP 403 Forbidden
-- **Rationale:** Multi-tenancy (managers see only their team) reduces risk of accidental approvals; self-approval check ensures compliance
+## API Endpoints
 
-### 3. **Audit Trail & Approver Tracking**
-- **Timestamp fields:** `submitted_date`, `approval_date`, `processing_date`, `returned_date` (if applicable)
-- **Approver identity:** Store `approved_by` (Manager user_id) and `processed_by` (Finance user_id) on Expense record
-- **Notes fields:** `manager_notes` (on approval/rejection), `finance_notes` (on processing/return)
-- **Rationale:** Full traceability required for compliance and dispute resolution
+### Employee Endpoints
+- `POST /expenses` — Submit a new expense (requires employee role)
+- `GET /expenses` — List own expenses with optional status filter (requires employee role)
+- `GET /expenses/{id}` — View expense detail with full audit trail (requires employee role)
 
-### 4. **Validation Rules**
-- **Amount:** Positive, max $100,000 per expense
-- **Description:** Required, non-empty, max 500 characters
-- **Expense date:** Must not be in the future (validates expense_date field if included)
-- **Rejection notes:** Required field (min 1 character, max 500) when rejecting
-- **Approval/Processing notes:** Optional (max 500 characters)
-- **Rationale:** Prevents invalid states early; required rejection notes ensure managers provide feedback
+### Manager Endpoints
+- `GET /expenses/team` — List expenses from direct reports with optional status filter
+- `GET /expenses/team/{employee_id}` — List specific employee's expenses
+- `PATCH /expenses/{id}/approve` — Approve an expense (requires manager role, must be own report)
+- `PATCH /expenses/{id}/reject` — Reject an expense with reason (requires manager role, must be own report)
 
-### 5. **Data Model Extensions**
-- Add to **Expense model:**
-  - `expense_date: datetime` — when the expense occurred (defaults to submitted_date if omitted)
-  - `approved_by: Optional[str]` — Manager user_id who approved
-  - `processed_by: Optional[str]` — Finance user_id who processed
-  - `returned_date: Optional[datetime]` — timestamp when Finance returned to Manager
-  - `category: Optional[str]` — (optional field; enum of Travel, Meals, Equipment, Other)
+### Finance Endpoints
+- `GET /expenses` — List all expenses with optional status filter (requires finance role)
+- `GET /expenses/{id}` — View expense detail with full audit trail (requires finance role)
+- `PATCH /expenses/{id}/approve` — Approve an expense (requires finance role)
+- `PATCH /expenses/{id}/reject` — Reject an expense with reason (requires finance role)
+- `PATCH /expenses/{id}/process` — Mark expense as processed (requires finance role)
 
-- Add to **Employee record** (if implementing manager relationships):
-  - `manager_id: Optional[str]` — User ID of the employee's manager
-  - **Note:** For MVP, may use mock data; actual implementation would link to HR system
+### Request/Response Contracts
+All endpoints return consistent response structure:
+- 200/201 for success with response body
+- 400 for validation errors with field-level error details
+- 401 for missing/invalid auth header
+- 403 for insufficient permissions
+- 404 for not found resources
 
-- Add to **ExpenseStore:**
-  - `list_by_manager(manager_id)` — returns SUBMITTED expenses for that manager's team
-  - `list_by_status(status)` — already exists; used for manager/finance queries
-  - `list_by_approved()` — returns all APPROVED expenses (for Finance)
+## Testing Strategy
 
-### 6. **API Endpoint Design**
+### Good Test Characteristics
+- Test external behavior, not implementation details
+- Test at the highest seam possible (API endpoints > services > repositories)
+- One assertion per test focused on a single behavior
+- Clear, descriptive test names that explain the scenario and expected outcome
+- Isolated from other tests (no shared state)
 
-**Employee Endpoints** (require `employee` role):
-- `POST /expenses` — Submit expense (already implemented in Slice 4)
-- `GET /expenses` — List own expenses (already implemented in Slice 4)
-- `GET /expenses/{expense_id}` — View own expense detail (already implemented in Slice 4)
+### Test Coverage Plan
 
-**Manager Endpoints** (require `manager` role):
-- `GET /expenses/pending` — List SUBMITTED expenses from own team (already stubbed in Slice 4)
-- `PUT /expenses/{expense_id}/approve` — Approve expense (already implemented in Slice 4)
-- `PUT /expenses/{expense_id}/reject` — Reject expense (already implemented in Slice 4)
+#### Unit Tests
+- **Services layer**: Test business logic in isolation (ExpenseService, ApprovalService)
+  - Valid and invalid inputs
+  - State transitions
+  - Validation rules
+  - Authorization checks
+- **Repositories layer**: Test data access patterns
+  - Create/read/update/list operations
+  - Filtering and indexing
+- **Schemas layer**: Test input validation
+  - Valid and invalid Pydantic schemas
 
-**Finance Endpoints** (require `finance` role):
-- `GET /expenses/approved` — List all APPROVED expenses awaiting processing (NEW — Slice 6)
-- `PUT /expenses/{expense_id}/process` — Mark as PROCESSED (NEW — Slice 6)
-- `PUT /expenses/{expense_id}/return` — Return to manager from APPROVED state (NEW — Slice 6)
+#### Integration Tests
+- **Complete workflows**: Test full approval chain
+  - Employee submits → Manager approves → Finance processes
+  - Employee submits → Manager rejects (with reason)
+  - Finance rejects approved claim (with reason)
+  - Full audit trail recorded correctly
+- **Role-based access**: Test authorization
+  - Employee cannot approve/reject
+  - Manager can only approve own reports
+  - Finance can only approve/process approved claims
 
-**Admin Endpoints** (require `admin` role):
-- `GET /expenses/all` — List all expenses across all statuses/employees (NEW — Slice 6)
+#### API Tests (Endpoint Contract Tests)
+- **Endpoint behavior**: Test HTTP contracts
+  - POST /expenses with valid/invalid data
+  - GET /expenses with various status filters
+  - PATCH /expenses/{id}/approve/reject with proper response codes
+  - 401/403 responses for auth failures
+  - 400 responses for validation failures
+- **Happy path workflows**: End-to-end API sequences
+  - Submit → Approve → Process
+  - Submit → Reject with reason
 
-### 7. **Mocked Authentication**
-- Use Base64-encoded Bearer tokens with JSON payload: `{"user_id": "...", "role": "..."}`
-- No real JWT/signing; authentication is mocked for testing purposes
-- Tokens include `user_id` and `role`; may add `manager_id` for team filtering
-- **Example:** `Bearer eyJ1c2VyX2lkIjogImVtcF8xMjMiLCAicm9sZSI6ICJlbXBsb3llZSJ9`
+### Test Organization
+- Mirror app structure: `tests/services/`, `tests/repositories/`, `tests/api/`
+- Fixtures for common test data (users, expenses in various states)
+- Mock implementations for simple dependencies (e.g., in-memory user repository for role testing)
 
-### 8. **Concurrent Update Handling**
-- **Approach:** Optimistic locking via version number
-- Add `version: int` field to Expense model (incremented on each update)
-- On update, check that provided version matches stored version; return 409 Conflict if mismatch
-- **Rationale:** In-memory storage is single-threaded in FastAPI by default, but versioning prevents accidental overwrites in high-concurrency scenarios
+### Coverage Target
+- 80%+ coverage on business logic (services, repositories, schemas)
+- All public API endpoints tested with happy and sad paths
+- All role-based access scenarios tested
 
-### 9. **Error Handling & Status Codes**
-- `400 Bad Request` — Validation failure (invalid amount, missing description, future date, etc.)
-- `401 Unauthorized` — Missing/invalid token
-- `403 Forbidden` — Insufficient role, self-approval attempt, accessing another employee's expense
-- `404 Not Found` — Expense does not exist
-- `409 Conflict` — Version mismatch (concurrent update detected)
-- `422 Unprocessable Entity` — Invalid state transition (e.g., trying to approve already-approved expense)
-- **Rationale:** Clear error codes allow clients to handle retry/user feedback appropriately
+## Feature Slices
 
-### 10. **In-Memory Storage & Scope**
-- Use dictionary-based store (already implemented in ExpenseStore)
-- Data is lost on server restart (acceptable for MVP/testing)
-- For production, migrate to persistent DB (PostgreSQL recommended; minimal code changes needed)
-- **Rationale:** Fast iteration, no external dependencies, clear boundary between business logic and persistence
+The implementation will be broken into vertical slices, each delivering end-to-end functionality:
 
-## Testing Decisions
+1. **Foundation Setup** - Models, in-memory repositories, auth middleware
+2. **Employee Expense Submission** - POST /expenses with validation
+3. **Employee View Expenses** - GET /expenses endpoints
+4. **Employee View Expense Detail** - GET /expenses/{id} with audit trail
+5. **Manager Approval Workflow** - Manager approve/reject endpoints
+6. **Finance Processing Workflow** - Finance approve/reject/process endpoints
+7. **Admin Access & Testing** - Test utilities and access patterns
 
-### What Makes a Good Test
-- **Test external behavior, not implementation details:** Assert on API responses and database state, not internal variable assignments
-- **One assertion per test where possible:** Clearer failure messages; exception: multi-step state assertions (e.g., approve → verify status changed)
-- **Avoid brittle mocks:** Use real in-memory store; mock only external dependencies (auth tokens)
-- **Test both success and failure paths:** Happy path + sad paths (validation, access control, state violations)
-- **Corner cases must be covered:** Self-approval, concurrent updates, role crossing, invalid state transitions
-
-### Test Coverage by Module
-
-**Models & Validation** (test_models.py — existing)
-- Valid expense submission with all required fields
-- Invalid expense: negative amount, zero amount, amount exceeds $100,000
-- Invalid expense: empty description, description > 500 chars
-- Invalid rejection: missing manager_notes
-- Invalid approval: manager_notes too long (> 500 chars)
-
-**Database/Store** (test_database.py — existing)
-- Create, read, update, delete operations
-- List by employee, list by status
-- Update existing vs. non-existent expense
-- **NEW:** List by manager (manager's team only)
-- **NEW:** Concurrent update detection (version mismatch)
-
-**Authentication & Authorization** (test_auth.py — existing)
-- Valid token decoding
-- Invalid/missing token rejection
-- Role-based access control (employee ≠ manager ≠ finance)
-- **NEW:** Manager cannot approve own expense
-- **NEW:** Finance cannot approve (manager-only action)
-
-**Employee Workflow** (test_submit_expense.py, test_view_expenses.py — existing)
-- Submit valid expense → stored with SUBMITTED status
-- Submit invalid expense → 400 Bad Request
-- View own expenses → returns only own expenses
-- View another employee's expense → 403 Forbidden
-- **NEW:** Resubmit after rejection → creates new expense
-
-**Manager Approval Workflow** (NEW — Slice 5)
-- Manager views pending expenses → only their team's expenses
-- Manager approves expense → status changes to APPROVED, approval_date set, approved_by captured
-- Manager rejects expense → status changes to REJECTED, manager_notes required
-- Manager cannot approve own expense → 403 Forbidden
-- Manager cannot approve already-approved expense → 422 Unprocessable Entity
-- Manager cannot approve rejected expense → 422 Unprocessable Entity
-- Rejection notes are captured and returned in expense detail
-- Approval notes (optional) are captured
-
-**Finance Processing Workflow** (NEW — Slice 6)
-- Finance views approved expenses → returns only APPROVED expenses
-- Finance processes expense → status changes to PROCESSED, processing_date set, processed_by captured
-- Finance returns expense to manager → status changes back to APPROVED, returned_date set, finance_notes captured
-- Finance cannot process non-approved expense → 422 Unprocessable Entity
-- Finance cannot process already-processed expense → 422 Unprocessable Entity
-- Finance sees system-wide expenses (not limited to team)
-- Employee cannot view finance-only endpoints → 403 Forbidden
-- Manager cannot view finance-only endpoints → 403 Forbidden
-
-**Admin Workflow** (NEW — Slice 6)
-- Admin views all expenses → returns all regardless of status/employee
-- Non-admin cannot access /expenses/all → 403 Forbidden
-
-**Corner Cases & Edge Cases**
-- Concurrent approval attempts on same expense → version mismatch prevents double-approval
-- Employee tries to approve another's expense → 403 Forbidden
-- Manager with no direct reports → list_pending returns empty
-- Expense with minimum valid data (amount, description only) → accepted
-- Expense with maximum valid amounts (amount=$100k, description=500 chars) → accepted
-- Manager tries to return expense (Finance-only) → 403 Forbidden
-- Finance user cannot reject (Manager-only) → 403 Forbidden
-- Updated expense shows all audit fields (approved_by, processing_date, etc.)
-
-### Test Seams
-- **Single seam:** Use the existing FastAPI dependency injection to mock auth tokens in tests
-- **No new seams required:** Existing store, models, and route structure support all test scenarios
-- Tests instantiate store and app directly; use test client to invoke routes with mock tokens
-
----
+Each slice includes:
+- Data model changes (if needed)
+- API endpoint implementation
+- Business logic/services
+- Input validation
+- Unit and integration tests
+- Audit trail updates
 
 ## Out of Scope
 
-1. **Persistent Database:** This plan uses in-memory storage; production migration to PostgreSQL/etc. is deferred
-2. **Real JWT Authentication:** Using Base64-encoded mock tokens; cryptographic signing deferred
-3. **Manager-Employee Relationships:** Manager filtering uses mock `manager_id`; real HR system integration deferred
-4. **Expense Categories/Rules:** Categories are optional; category-specific validation (e.g., "Meals ≤ $50") deferred
-5. **Receipt Upload/Attachment:** Receipt references are text-only; file upload deferred
-6. **Notifications:** No email/Slack notifications when expenses are approved/rejected
-7. **Scheduled Processing:** No batch processing or scheduled reimbursement runs
-8. **Reporting/Analytics:** No dashboards, aggregate reports, or trend analysis
-9. **Tax/Accounting Integration:** No export to QuickBooks or accounting systems
-10. **Multi-Currency Support:** All amounts in a single currency (USD assumed)
-11. **Approval Workflows with Escalation:** No multi-level approval chains or escalation rules
-12. **Expense Amendments:** Cannot edit submitted expenses; must reject and resubmit
-13. **Bulk Operations:** No bulk approve/reject endpoints
+The following are explicitly out of scope for this implementation:
 
----
+1. **Real JWT signing/verification** — Using mocked Bearer tokens
+2. **External authentication providers** — No OAuth, SAML, or identity server integration
+3. **Database persistence** — In-memory storage only; data lost on restart
+4. **File storage for receipts** — Storing receipt URLs as strings; no file upload/download
+5. **Email notifications** — No automatic emails to employees/managers on status changes
+6. **Delegation of approvals** — Managers cannot delegate approval to others
+7. **Expense editing after submission** — Claims are locked once submitted
+8. **Category or amount limits** — No per-category spending caps or monthly limits
+9. **Audit log export/reporting** — No reports or bulk audit log downloads
+10. **API documentation UI** — No Swagger/OpenAPI UI (but contracts documented in code)
+11. **Pagination and sorting advanced options** — Basic offset/limit only
+12. **Attachment upload** — Receipt URLs only, no file uploads
 
-## Further Notes
+## Key Assumptions
 
-### Implementation Order (Feature Slices)
-1. **Slice 5: Manager Approval Workflow**
-   - Endpoints: `GET /expenses/pending`, `PUT /expenses/{id}/approve`, `PUT /expenses/{id}/reject`
-   - Model updates: `approved_by` field, `manager_notes` field
-   - Store updates: `list_by_manager()` method
-   - Tests: Manager approval, rejection, access control, corner cases
+1. Users are pre-configured in the system with their role and manager relationships
+2. No real user authentication; mocked via Bearer token header for testing
+3. One manager per employee (no matrix reporting)
+4. Managers can approve expenses for direct reports; Finance can approve from any manager
+5. Rejection is terminal; no resubmission workflow in v1
+6. All timestamps are in UTC
+7. All amounts are in USD (no multi-currency support)
+8. Expense dates cannot be future-dated
 
-2. **Slice 6: Finance Processing & Admin Access**
-   - Endpoints: `GET /expenses/approved`, `PUT /expenses/{id}/process`, `PUT /expenses/{id}/return`, `GET /expenses/all`
-   - Model updates: `processed_by`, `returned_date`, `finance_notes` fields
-   - Store updates: `list_by_approved()` method, filter logic
-   - Tests: Finance processing, return, admin access, end-to-end workflows
+## Implementation Notes
 
-### Assumptions
-- Single FastAPI application; no microservices
-- In-memory storage persists for the lifetime of the process only
-- Employees know their manager_id for auth token claims (or hardcoded in test data)
-- No concurrent requests requiring distributed locking (in-memory store is sufficient)
-- All timestamps in UTC
-
-### Key Design Principles
-- **Clear state machine:** Expenses move through predictable states; no ambiguous transitions
-- **Audit-first:** Every action is recorded with who, when, and why
-- **Role separation:** Each role has distinct responsibilities; no cross-role actions
-- **Fail-safe defaults:** Require explicit approval; no auto-approval; rejection requires notes
-- **Test-driven:** Comprehensive tests ensure reliability before hand-off to QA
-
----
-
-**Next Step:** Invoke `/to-issues` to break this plan into finalized feature slices ready for implementation.
+- Follow clean code principles throughout (single responsibility, DRY, meaningful names)
+- Use type hints on all functions
+- Comprehensive docstrings for public APIs and non-obvious logic
+- Error messages are user-friendly and actionable
+- All endpoints are stateless (FastAPI dependency injection for auth)
+- Request/response contracts are consistent and versioned in comments

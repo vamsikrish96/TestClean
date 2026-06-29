@@ -1,69 +1,64 @@
 from enum import Enum
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, Field, ConfigDict
+from uuid import uuid4
 
 
 class ExpenseStatus(str, Enum):
-    SUBMITTED = "SUBMITTED"
-    APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
-    PROCESSED = "PROCESSED"
+    PENDING = "pending"
+    APPROVED_BY_MANAGER = "approved_by_manager"
+    APPROVED_BY_FINANCE = "approved_by_finance"
+    REJECTED = "rejected"
+    PROCESSED = "processed"
 
 
-class Expense(BaseModel):
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "id": "exp_000001",
-                "employee_id": "emp_123",
-                "amount": 150.50,
-                "description": "Conference ticket",
-                "status": "SUBMITTED",
-                "submitted_date": "2026-06-29T10:30:00Z",
-                "approval_date": None,
-                "processing_date": None,
-                "manager_notes": None,
-                "finance_notes": None,
-                "approved_by": None,
-                "processed_by": None,
-                "returned_date": None,
-            }
-        }
-    )
+class ExpenseCategory(str, Enum):
+    TRAVEL = "Travel"
+    MEALS = "Meals"
+    EQUIPMENT = "Equipment"
+    OTHER = "Other"
 
-    id: Optional[str] = None
+
+class UserRole(str, Enum):
+    EMPLOYEE = "employee"
+    MANAGER = "manager"
+    FINANCE = "finance"
+
+
+@dataclass
+class User:
+    id: str
+    name: str
+    role: UserRole
+    manager_id: Optional[str] = None
+
+    def __hash__(self):
+        return hash(self.id)
+
+
+@dataclass
+class Expense:
+    id: str
     employee_id: str
     amount: float
+    category: ExpenseCategory
     description: str
-    status: ExpenseStatus = ExpenseStatus.SUBMITTED
-    submitted_date: Optional[datetime] = None
-    approval_date: Optional[datetime] = None
-    processing_date: Optional[datetime] = None
-    manager_notes: Optional[str] = None
-    finance_notes: Optional[str] = None
+    expense_date: str
+    receipt_url: str
+    status: ExpenseStatus = ExpenseStatus.PENDING
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=datetime.utcnow)
     approved_by: Optional[str] = None
-    processed_by: Optional[str] = None
-    returned_date: Optional[datetime] = None
-    version: int = 1
+    rejection_reason: Optional[str] = None
 
 
-class ExpenseSubmit(BaseModel):
-    amount: float = Field(..., gt=0, le=100000, description="Must be positive and ≤ $100,000")
-    description: str = Field(..., min_length=1, max_length=500)
-
-
-class ExpenseApprove(BaseModel):
-    manager_notes: Optional[str] = Field(None, max_length=500)
-
-
-class ExpenseReject(BaseModel):
-    manager_notes: str = Field(..., min_length=1, max_length=500)
-
-
-class ExpenseProcess(BaseModel):
-    finance_notes: Optional[str] = Field(None, max_length=500)
-
-
-class ExpenseReturn(BaseModel):
-    finance_notes: Optional[str] = Field(None, max_length=500)
+@dataclass
+class ExpenseHistory:
+    id: str
+    expense_id: str
+    status_from: ExpenseStatus
+    status_to: ExpenseStatus
+    changed_by: str
+    changed_at: datetime
+    comment: Optional[str] = None
