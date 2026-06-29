@@ -1,6 +1,8 @@
-from fastapi import FastAPI, Depends
+from datetime import datetime, timezone
+from fastapi import FastAPI, Depends, HTTPException, status
 from app.database import ExpenseStore
 from app.auth import get_current_user, require_role, TokenPayload
+from app.models import Expense, ExpenseStatus, ExpenseSubmit
 
 app = FastAPI(title="Expense Approval Workflow API", version="1.0.0")
 
@@ -30,3 +32,19 @@ async def manager_only(token: TokenPayload = Depends(require_role("manager"))):
 @app.get("/finance-only")
 async def finance_only(token: TokenPayload = Depends(require_role("finance"))):
     return {"message": f"Hello {token.user_id}, you have finance access"}
+
+
+@app.post("/expenses", response_model=Expense)
+async def submit_expense(
+    submit_data: ExpenseSubmit,
+    token: TokenPayload = Depends(require_role("employee"))
+):
+    expense = Expense(
+        employee_id=token.user_id,
+        amount=submit_data.amount,
+        description=submit_data.description,
+        status=ExpenseStatus.SUBMITTED,
+        submitted_date=datetime.now(timezone.utc)
+    )
+    created = store.create(expense)
+    return created
