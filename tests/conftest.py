@@ -2,13 +2,16 @@ import base64
 import json
 import pytest
 from fastapi.testclient import TestClient
-from app.main import app
+from app.main import app, get_store
 from app.database import ExpenseStore
 
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    store = ExpenseStore()
+    app.dependency_overrides[get_store] = lambda: store
+    yield TestClient(app)
+    app.dependency_overrides.clear()
 
 
 def create_token(user_id: str, role: str) -> str:

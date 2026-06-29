@@ -178,3 +178,267 @@ with pytest.raises(HTTPException) as exc_info:
 assert exc_info.value.status_code == 401
 ```
 **Rationale:** `pytest.raises(Exception)` passes even if `decode_token` raises a `TypeError`, `AttributeError`, or any other unrelated error. The tests should validate the specific contract: an `HTTPException` with a 401 status code. Otherwise they give false confidence that error handling is correct when it might simply be crashing.
+
+---
+
+# Clean Code Review — Slice 2 (Employee Submit Expense: POST /expenses)
+
+Review date: 2026-06-29
+
+Reviewed files: `app/main.py`, `tests/test_submit_expense.py`, `tests/conftest.py`
+
+---
+
+## Suggestion 10: `client` Fixture Resets `app.store`, Not the Module-Level `store` the Endpoint Uses
+
+**Location:** `tests/conftest.py:11` / `app/main.py:10, 35`
+
+**Clean Code Principle:** F.I.R.S.T. — **Independent** — no test should depend on the state left by another
+
+**The Problem:**
+
+```python
+# conftest.py:11 — sets an attribute on the FastAPI app object
+app.store = ExpenseStore()
+
+# main.py:10 — module-level variable, created once at import time
+store = ExpenseStore()
+
+# main.py:35 — endpoint calls the module-level variable; app.store is never read
+created = store.create(expense)
+```
+
+Setting `app.store` is a no-op: the endpoint closure captures the module-level `store`, not
+the attribute on `app`. Every test in the suite accumulates state in the same store instance.
+
+**Suggested Fix:** Use FastAPI's dependency-override mechanism so the fixture controls what
+the endpoint actually receives:
+
+```python
+# app/main.py
+store = ExpenseStore()
+
+def get_store() -> ExpenseStore:
+    return store
+
+@app.post("/expenses", response_model=Expense, status_code=status.HTTP_201_CREATED)
+async def submit_expense(
+    submit_data: ExpenseSubmit,
+    token: TokenPayload = Depends(require_role("employee")),
+    expense_store: ExpenseStore = Depends(get_store),
+):
+    expense = Expense(
+        employee_id=token.user_id,
+        amount=submit_data.amount,
+        description=submit_data.description,
+        status=ExpenseStatus.SUBMITTED,
+        submitted_date=datetime.now(timezone.utc),
+    )
+    return expense_store.create(expense)
+```
+
+```python
+# tests/conftest.py
+from app.main import app, get_store
+
+@pytest.fixture
+def client():
+    fresh_store = ExpenseStore()
+    app.dependency_overrides[get_store] = lambda: fresh_store
+    yield TestClient(app)
+    app.dependency_overrides.clear()
+```
+
+**Rationale:** Without this, tests are order-dependent. Whichever test runs first gets ID
+`exp_000001`; subsequent tests get higher counters. Adding a new test at the top of the
+file silently breaks assertions in all tests below it.
+
+---
+
+## Suggestion 11: Magic String `"exp_000001"` Encodes Hidden Ordering Assumption
+
+**Location:** `tests/test_submit_expense.py:18`
+
+**Clean Code Principle:** No Magic Values — unexplained literals encode hidden assumptions and couple tests to implementation details
+
+**The Problem:**
+
+```python
+assert data["id"] == "exp_000001"
+```
+
+This encodes two facts that belong to the implementation, not the behavioral contract:
+1. The store counter starts at 1.
+2. The ID is zero-padded to 6 digits.
+
+If the store is not reset (see Suggestion 10), this assertion breaks on any test that creates
+an expense before it.
+
+**Suggested Fix:** Assert the structural contract — that an ID was assigned — not the
+exact value:
+
+```python
+assert data["id"] is not None
+assert data["id"].startswith("exp_")
+```
+
+If the zero-padding format is a public contract worth testing, do so in a dedicated store
+unit test, not in the HTTP endpoint test.
+
+**Rationale:** Assertions against internal counter values couple the test to the store's
+private counter. They will fail on any refactor of ID generation even when the API contract
+is unchanged.
+
+---
+
+## Suggestion 12: `test_submit_valid_expense` Tests Multiple Concepts in One Function
+
+**Location:** `tests/test_submit_expense.py:4-19`
+
+**Clean Code Principle:** Single Concept Per Test — one test, one reason to fail
+
+**The Problem:**
+
+`test_submit_valid_expense` makes six assertions covering distinct behavioral outcomes:
+
+```python
+assert data["employee_id"] == "emp_001"          # token claim is mapped to expense
+assert data["amount"] == 150.50                   # input fields are echoed
+assert data["description"] == "Conference ticket" # input fields are echoed
+assert data["status"] == ExpenseStatus.SUBMITTED  # initial status is set correctly
+assert data["id"] == "exp_000001"                 # ID is assigned (+ magic value)
+assert data["submitted_date"] is not None         # timestamp is stamped
+```
+
+A failure message says "AssertionError" but does not identify which behavioral contract
+broke.
+
+**Suggested Fix:** Break into focused tests named after what they verify:
+
+```python
+def test_submit_expense_maps_employee_id_from_token(client, employee_token):
+    data = _submit_valid(client, employee_token)
+    assert data["employee_id"] == "emp_001"
+
+def test_submit_expense_sets_status_to_submitted(client, employee_token):
+    data = _submit_valid(client, employee_token)
+    assert data["status"] == ExpenseStatus.SUBMITTED
+
+def test_submit_expense_stamps_submitted_date(client, employee_token):
+    data = _submit_valid(client, employee_token)
+    assert data["submitted_date"] is not None
+
+def test_submit_expense_echoes_input_fields(client, employee_token):
+    payload = {"amount": 150.50, "description": "Conference ticket"}
+    data = client.post("/expenses", json=payload, headers={"Authorization": employee_token}).json()
+    assert data["amount"] == 150.50
+    assert data["description"] == "Conference ticket"
+
+def _submit_valid(client, token):
+    return client.post(
+        "/expenses",
+        json={"amount": 100, "description": "Test"},
+        headers={"Authorization": token},
+    ).json()
+```
+
+**Rationale:** Each test name now documents the behavioral contract in plain English. A
+failing test immediately identifies which contract broke without reading the assertion body.
+
+---
+
+## Suggestion 13: Duplicate Tests Add Noise Without Adding Coverage
+
+**Location:** `tests/test_submit_expense.py:152-162` and `164-173`
+
+**Clean Code Principle:** Eliminate Noise / DRY — redundant tests increase maintenance burden without increasing confidence
+
+**The Problem:**
+
+`test_submit_stores_with_submitted_status` (line 152) and `test_employee_id_from_token`
+(line 164) each assert a single fact already asserted by `test_submit_valid_expense`:
+
+- line 152-162 duplicates `test_submit_valid_expense:17` (`status == SUBMITTED`)
+- line 164-173 duplicates `test_submit_valid_expense:14` (`employee_id == "emp_001"`)
+
+**Suggested Fix:** Delete both functions. After splitting `test_submit_valid_expense` per
+Suggestion 12, these behaviors will each have a dedicated, named test.
+
+**Rationale:** Duplicate assertions mean a behavior change requires updating multiple tests.
+They also mislead readers into thinking these are testing something distinct when they are not.
+
+---
+
+## Suggestion 14: POST /expenses Returns 200 Instead of 201 Created
+
+**Location:** `app/main.py:23`
+
+**Clean Code Principle:** Intention-Revealing Code — the response code is part of the API contract and must reflect what actually happened
+
+**The Problem:**
+
+```python
+@app.post("/expenses", response_model=Expense)  # defaults to 200 OK
+```
+
+RFC 9110 (HTTP Semantics) defines `201 Created` for successful resource creation. Returning
+`200 OK` signals that a query was answered, not that a resource was created. Clients using
+the status code to distinguish creation from retrieval will misread the response.
+
+**Suggested Fix:**
+
+```python
+from fastapi import status
+
+@app.post("/expenses", response_model=Expense, status_code=status.HTTP_201_CREATED)
+```
+
+Update test assertions from `== 200` to `== 201` in `test_submit_expense.py:12` and
+`test_submit_max_valid_amount:125` and `test_submit_max_description_length:137`.
+
+**Rationale:** HTTP status codes are the API's vocabulary. Using `200` where `201` is
+correct is the equivalent of a function named `get` that also creates a record — the
+name contradicts the behavior.
+
+---
+
+## Suggestion 15: Identical Role-Forbidden Tests Should Be Parameterized
+
+**Location:** `tests/test_submit_expense.py:98-115`
+
+**Clean Code Principle:** DRY / Eliminate Noise — copy-pasted test functions diverge silently over time
+
+**The Problem:**
+
+`test_submit_as_manager_forbidden` and `test_submit_as_finance_forbidden` differ only in
+the fixture they use. Adding a third non-employee role requires copy-pasting a third function.
+
+**Suggested Fix:**
+
+```python
+@pytest.mark.parametrize("token_fixture", ["manager_token", "finance_token"])
+def test_submit_expense_forbidden_for_non_employees(request, client, token_fixture):
+    token = request.getfixturevalue(token_fixture)
+    response = client.post(
+        "/expenses",
+        json={"amount": 100, "description": "Test"},
+        headers={"Authorization": token},
+    )
+    assert response.status_code == 403
+```
+
+**Rationale:** A new role is a one-word addition to the parametrize list. Two identical
+functions diverge when one is updated and the other is not, eroding test reliability silently.
+
+---
+
+## Slice 2 Summary
+
+| # | Severity | Location | Principle |
+|---|----------|----------|-----------|
+| 10 | High | `conftest.py:11` / `main.py:10,35` | F.I.R.S.T. Independent |
+| 11 | High | `test_submit_expense.py:18` | No Magic Values |
+| 12 | Medium | `test_submit_expense.py:4-19` | Single Concept Per Test |
+| 13 | Medium | `test_submit_expense.py:152-173` | Eliminate Noise / DRY |
+| 14 | Medium | `main.py:23` | Intention-Revealing Code |
+| 15 | Low | `test_submit_expense.py:98-115` | DRY |
